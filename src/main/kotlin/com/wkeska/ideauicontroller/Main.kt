@@ -76,6 +76,22 @@ internal fun requireRunningState(): State {
 
 internal fun connect(): RemoteRobot = robot(requireRunningState())
 
+internal fun zipPluginDirectory(sourceDir: Path, destZip: Path) {
+    val top = sourceDir.fileName.toString()
+    java.util.zip.ZipOutputStream(Files.newOutputStream(destZip)).use { zos ->
+        Files.walk(sourceDir).use { stream ->
+            stream.forEach { p ->
+                if (p == sourceDir) return@forEach
+                val rel = sourceDir.relativize(p).toString().replace('\\', '/')
+                val entryName = if (Files.isDirectory(p)) "$top/$rel/" else "$top/$rel"
+                zos.putNextEntry(java.util.zip.ZipEntry(entryName))
+                if (!Files.isDirectory(p)) Files.copy(p, zos)
+                zos.closeEntry()
+            }
+        }
+    }
+}
+
 @Command(
     name = "idea-ui-controller",
     mixinStandardHelpOptions = true,
@@ -156,6 +172,9 @@ class RunIdeCommand : Callable<Int> {
     @Option(names = ["--timeout-seconds"], description = ["Max seconds to wait for robot-server (default: 180)"])
     var timeoutSeconds: Long = 180
 
+    @Option(names = ["--plugin"], description = ["Extra plugin archive (zip) or unpacked plugin directory to install into the sandbox. May be repeated."])
+    var extraPlugins: List<Path> = emptyList()
+
     override fun call(): Int {
         require(Files.isDirectory(idePath)) { "IDE path is not a directory: $idePath" }
         State.load()?.takeIf { it.isAlive() }?.let {
@@ -172,18 +191,35 @@ class RunIdeCommand : Callable<Int> {
         val robotPlugin = IdeDownloader(http).downloadRobotPlugin(sandbox)
         println("Robot plugin: $robotPlugin")
 
+        val pluginArchives: MutableList<Path> = mutableListOf(robotPlugin)
+        for (extra in extraPlugins) {
+            require(extra.exists()) { "Plugin path does not exist: $extra" }
+            if (Files.isDirectory(extra)) {
+                val zipped = sandbox.resolve("${extra.fileName}.zip")
+                zipPluginDirectory(extra, zipped)
+                println("Packed plugin dir $extra -> $zipped")
+                pluginArchives.add(zipped)
+            } else {
+                println("Extra plugin archive: $extra")
+                pluginArchives.add(extra.toAbsolutePath())
+            }
+        }
+
         val process = IdeLauncher.launchIde(
             pathToIde = idePath.toAbsolutePath(),
             additionalProperties = mapOf("robot-server.port" to port),
             additionalVmOptions = emptyList(),
-            requiredPluginsArchives = listOf(robotPlugin),
+            requiredPluginsArchives = pluginArchives,
             ideSandboxDir = sandbox,
         )
         println("IDE pid=${process.pid()}. Waiting up to ${timeoutSeconds}s for robot-server on :$port ...")
 
         val remote = RemoteRobot("http://127.0.0.1:$port", http)
-        waitFor(Duration.ofSeconds(timeoutSeconds), Duration.ofSeconds(3)) {
-            runCatching { remote.callJs<Boolean>("true") }.getOrDefault(false)
+        waitFor(Duration.ofSeconds(timeoutSeconds), Duration.ofMillis(200)) {
+            val tcpOpen = try {
+                java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 200); true }
+            } catch (_: Throwable) { false }
+            tcpOpen && runCatching { remote.callJs<Boolean>("true") }.getOrDefault(false)
         }
 
         State(process.pid(), port, sandbox).save()

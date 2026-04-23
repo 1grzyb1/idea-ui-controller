@@ -18,10 +18,30 @@ and RPC primitives (`callJs`, `runJs`) come from there.
   daemon's `pid`, `port`, and sandbox directory.
 - **Sandbox.** Every `runIde` creates a fresh temp sandbox directory,
   installs the robot-server plugin into it, and tears it down on `stopIde`.
-- **Exit codes.** `0` = success, non-zero = failure. Every command prints a
-  human-readable status line on success.
+- **Exit codes.** `0` = success, non-zero = failure.
 - **Synchronous.** Every subcommand blocks until its action has completed on
   the IDE side. Callers must not insert their own `sleep`s.
+
+## Consumers
+
+### Skill
+`.claude/skills/idea-ui-controller/SKILL.md` teaches a Claude Code agent how
+to use every CLI command. When the CLI changes, the skill changes in the
+same commit — the agent has no other source of truth.
+
+### QA agents
+Two Claude subagents that automate end-to-end IDE QA via the CLI:
+
+- **`qa-ide-feature`** (orchestrator) — takes a feature description, gathers
+  context from source + a live IDE, designs several test scenarios,
+  dispatches them one at a time to the runner, accumulates lessons between
+  runs, and writes a final report. Never drives the IDE itself.
+- **`qa-scenario-runner`** (executor) — receives one scenario at a time,
+  drives the IDE step by step via the CLI, writes a detailed log to a path
+  the orchestrator specifies, and returns a short status summary.
+
+`qa-ide-feature` is the user-facing entry point; `qa-scenario-runner` is
+internal to it.
 
 ## Runtime requirements
 
@@ -29,37 +49,31 @@ and RPC primitives (`callJs`, `runJs`) come from there.
 - **IDE path.** On macOS, the `.app` bundle directory (e.g.
   `IntelliJ IDEA.app`). On Linux/Windows, the unpacked distribution dir.
 
-## Companion skill
-
-The CLI is consumed by a Claude Code skill at
-`.claude/skills/idea-ui-controller/SKILL.md` which teaches an agent how to
-use every command below. When the CLI surface changes, the skill changes in
-the same commit — the agent has no other source of truth.
-
 ## Command surface
 
 ### Daemon lifecycle
 
-- **`runIde <idePath> [--port N] [--timeout-seconds N]`** — launch, wait for
-  robot-server, register state. Refuses to start a second IDE.
-- **`stopIde`** — kill registered IDE + delete sandbox. Tolerates stale state.
+- **`runIde <idePath> [--port N] [--timeout-seconds N] [--plugin PATH]...`**
+  Launch the IDE with the robot-server plugin (and any extra plugins passed
+  via `--plugin`), wait until the robot-server responds, and register the
+  daemon. `--plugin` accepts either a `.zip` archive or an unpacked plugin
+  directory — directory form is auto-zipped into the sandbox. The startup
+  probe interleaves a TCP-open check with a `callJs("true")` round-trip,
+  polled every 200 ms, so the CLI returns as soon as the server is ready.
+- **`stopIde`** — kill registered IDE + delete sandbox.
 - **`probe [--port N]`** — one `callJs("true")` health check.
 
 ### Observation
 
-- **`getState`** — print the full UI component tree (XML). Used to discover
-  xpaths by grepping for `accessiblename`, `class`, or `text`.
+- **`getState`** — print the full UI component tree (XML).
 
 ### Generic action / scripting
 
 - **`clickButton (--xpath <xp> | --text <t>) [--timeout-seconds N]`** — find
-  a component and click it. `--text` resolves to a disjunction over
-  `@text`, `@accessiblename`, and `@visible_text`. Multiple matches → first
-  wins, with a warning on stderr.
-- **`runJs --script <js> [--edt]`** — arbitrary `RemoteRobot.runJs` (no
-  return value). `--edt` runs the script on the AWT event dispatch thread.
-- **`callJs --script <js> [--edt]`** — arbitrary `RemoteRobot.callJs`; the
-  returned `Serializable` is printed.
+  and click. Multiple matches → first wins, with a warning on stderr.
+- **`runJs --script <js> [--edt]`** — arbitrary `RemoteRobot.runJs`.
+- **`callJs --script <js> [--edt]`** — arbitrary `RemoteRobot.callJs`;
+  the returned `Serializable` is printed.
 
 ### Page-scoped commands
 
@@ -73,10 +87,10 @@ ActionLinkFixture, Gutter).
 
 **Editor** (all take optional `--file <tab-title>`; omitted → first
 `EditorComponentImpl`):
-- `editorVerify`, `editorOpen --file X` (clicks the tab).
+- `editorVerify`, `editorOpen --file X`.
 - `editorGetText`, `editorGetSelectedText`, `editorCaretOffset`,
   `editorCaretCount`, `editorIsBlockCursor`.
-- `editorInjectText --text "..."` — replaces the document via a write action.
+- `editorInjectText --text "..."` — write-action replace.
 - `editorMoveToLine --line N` — 1-based.
 
 **Main IDE frame** — `ideVerify`, `ideProjectName`, `ideIsSmart`,
@@ -92,38 +106,29 @@ ActionLinkFixture, Gutter).
 
 **Generic widgets**
 - `listSelect --xpath <JList-locator> (--index N | --text "...")`.
-- `textFieldSet --label "..." --text "..."` — sets a `JTextComponent` whose
-  `labelFor` is the given `JLabel`.
-- `checkboxSet --text "..." --checked (true|false)` — clicks only if the
-  current state differs; the value is mandatory.
-- `actionLinkClickByText --text "..."` — click an `ActionLink` by its
-  visible text (used to dismiss onboarding panels like
-  "Meet the Islands Theme").
+- `textFieldSet --label "..." --text "..."`.
+- `checkboxSet --text "..." --checked (true|false)`.
+- `actionLinkClickByText --text "..."`.
 
 ### High-level flows
 
-- **`projectCreateFromDialog --name X [--location PATH]`** — runs
-  Welcome → New Project → fill Name/Location → Create → wait for IdeFrame.
-  Post-return state: the project may still be indexing (call `ideWaitSmart`
-  if needed) and onboarding panels may appear.
+- **`projectCreateFromDialog --name X [--location PATH]`** — full
+  Welcome → New Project → fill → Create → wait for IdeFrame.
 - **`createScratchFile --name X.ext [--language LANG] [--content "..."]`** —
-  create and open a scratch file via `ScratchRootType`. Requires an open
-  project. `--language` is an IntelliJ Language ID (e.g. `kotlin`, `JAVA`,
-  `Python`); defaults to plain text. Scratches live under the IDE config
-  directory (the sandbox's `config*/scratches/`), not under the project.
+  create + open a scratch file via `ScratchRootType`.
 
 ## Installation
 
 `scripts/install.sh` builds the executable and places it on a predictable
-path so agents can invoke it by name.
+path so the skill/agents can invoke it by name.
 
 ## Build
 
-- `./gradlew shadowJar` — fat jar at `build/libs/idea-ui-controller-fat.jar`.
+- `./gradlew shadowJar` — `build/libs/idea-ui-controller-fat.jar`.
 - `./gradlew executable` — self-executing stub at `build/libs/idea-ui-controller`.
 
 ## Non-goals
 
-- No parallel IDE instances. One daemon at a time, one state file.
-- No test-framework integration. The CLI drives the IDE; callers assert.
+- No parallel IDE instances. One daemon, one state file.
+- No test-framework integration. The CLI drives; callers assert.
 - No Robot Framework compatibility. Names collide; protocols do not.
