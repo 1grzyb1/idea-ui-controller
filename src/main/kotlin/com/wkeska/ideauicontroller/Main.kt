@@ -29,7 +29,7 @@ import kotlin.system.exitProcess
 private val STATE_DIR: Path = Path.of(System.getProperty("user.home"), ".idea-ui-controller")
 private val STATE_FILE: Path = STATE_DIR.resolve("state.properties")
 
-private data class State(val pid: Long, val port: Int, val sandbox: Path) {
+internal data class State(val pid: Long, val port: Int, val sandbox: Path) {
     fun save() {
         Files.createDirectories(STATE_DIR)
         val props = Properties().apply {
@@ -57,15 +57,24 @@ private data class State(val pid: Long, val port: Int, val sandbox: Path) {
     }
 }
 
-private fun State.isAlive(): Boolean = ProcessHandle.of(pid).map { it.isAlive }.orElse(false)
+internal fun State.isAlive(): Boolean = try {
+    java.net.Socket().use { sock ->
+        sock.connect(java.net.InetSocketAddress("127.0.0.1", port), 500)
+        true
+    }
+} catch (_: Throwable) {
+    false
+}
 
-private fun robot(state: State): RemoteRobot = RemoteRobot("http://127.0.0.1:${state.port}", OkHttpClient())
+internal fun robot(state: State): RemoteRobot = RemoteRobot("http://127.0.0.1:${state.port}", OkHttpClient())
 
-private fun requireRunningState(): State {
+internal fun requireRunningState(): State {
     val s = State.load() ?: error("No IDE registered. Run `runIde` first.")
     check(s.isAlive()) { "Registered IDE (pid=${s.pid}) is not alive. Stale state at $STATE_FILE." }
     return s
 }
+
+internal fun connect(): RemoteRobot = robot(requireRunningState())
 
 @Command(
     name = "idea-ui-controller",
@@ -77,6 +86,41 @@ private fun requireRunningState(): State {
         GetStateCommand::class,
         ClickButtonCommand::class,
         ProbeCommand::class,
+        RunJsCommand::class,
+        CallJsCommand::class,
+        WelcomeVerifyCommand::class,
+        WelcomeNewProjectCommand::class,
+        WelcomeNewSolutionCommand::class,
+        WelcomeMoreActionsCommand::class,
+        WelcomeImportProjectCommand::class,
+        WelcomeHeavyweightPopupCommand::class,
+        EditorVerifyCommand::class,
+        EditorOpenCommand::class,
+        EditorGetTextCommand::class,
+        EditorGetSelectedTextCommand::class,
+        EditorCaretOffsetCommand::class,
+        EditorCaretCountCommand::class,
+        EditorIsBlockCursorCommand::class,
+        EditorInjectTextCommand::class,
+        EditorMoveToLineCommand::class,
+        IdeVerifyCommand::class,
+        IdeProjectNameCommand::class,
+        IdeIsSmartCommand::class,
+        IdeWaitSmartCommand::class,
+        DialogVerifyCommand::class,
+        DialogTitleCommand::class,
+        SearchEverywhereVerifyCommand::class,
+        ActionMenuVerifyCommand::class,
+        ActionMenuItemCommand::class,
+        ActionLinkClickCommand::class,
+        GutterVerifyCommand::class,
+        ListSelectCommand::class,
+        TextFieldSetCommand::class,
+        CheckboxSetCommand::class,
+        DialogClickButtonCommand::class,
+        CreateScratchFileCommand::class,
+        ActionLinkClickByTextCommand::class,
+        ProjectCreateFromDialogCommand::class,
     ],
 )
 class App
@@ -156,7 +200,19 @@ class StopIdeCommand : Callable<Int> {
             println("No state file.")
             return 0
         }
-        ProcessHandle.of(state.pid).ifPresent { it.destroy() }
+        runCatching {
+            RemoteRobot("http://127.0.0.1:${state.port}", OkHttpClient())
+                .runJs("com.intellij.openapi.application.ApplicationManager.getApplication().exit(true, true);", false)
+        }
+        runCatching { ProcessHandle.of(state.pid).ifPresent { it.destroy() } }
+        runCatching {
+            val p = ProcessBuilder("lsof", "-iTCP:${state.port}", "-sTCP:LISTEN", "-t").redirectErrorStream(true).start()
+            val out = p.inputStream.bufferedReader().readText().trim()
+            p.waitFor()
+            out.lineSequence().filter { it.isNotBlank() }.forEach { pidStr ->
+                pidStr.trim().toLongOrNull()?.let { pid -> ProcessHandle.of(pid).ifPresent { it.destroy() } }
+            }
+        }
         runCatching { state.sandbox.toFile().deleteRecursively() }
         State.clear()
         println("Stopped pid=${state.pid}.")
@@ -164,12 +220,61 @@ class StopIdeCommand : Callable<Int> {
     }
 }
 
-@Command(name = "getState", description = ["Print the UI component tree of the registered IDE."])
+@Command(
+    name = "getState",
+    description = [
+        "Print a focus summary (current window + other visible windows) followed by the full UI component tree.",
+    ],
+)
 class GetStateCommand : Callable<Int> {
+    @Option(names = ["--no-tree"], description = ["Skip the full XML tree; print only the focus summary."])
+    var noTree: Boolean = false
+
     override fun call(): Int {
         val state = requireRunningState()
+        val r = RemoteRobot("http://127.0.0.1:${state.port}", OkHttpClient())
+
+        val summary = runCatching {
+            r.callJs<String>(
+                """
+                importClass(java.awt.Window);
+                importClass(java.awt.Frame);
+                importClass(java.awt.Dialog);
+                importClass(java.awt.KeyboardFocusManager);
+                function describe(w) {
+                    if (w === null) return "<none>";
+                    var title = "";
+                    if (w instanceof Frame || w instanceof Dialog) {
+                        var t = w.getTitle();
+                        if (t !== null) title = String(t);
+                    }
+                    var cls = w.getClass().getSimpleName();
+                    return (title.length > 0 ? "'" + title + "' " : "") + "(" + cls + ")";
+                }
+                var kfm = KeyboardFocusManager.getCurrentKeyboardFocusManager();
+                var current = kfm.getFocusedWindow();
+                if (current === null) current = kfm.getActiveWindow();
+                var others = [];
+                var all = Window.getWindows();
+                for (var i = 0; i < all.length; i++) {
+                    var w = all[i];
+                    if (w === current) continue;
+                    if (!w.isShowing()) continue;
+                    others.push(describe(w));
+                }
+                "Current window: " + describe(current) + "\n" +
+                "Other windows: [" + others.join(", ") + "]\n";
+                """.trimIndent(),
+                true,
+            )
+        }.getOrElse { "Current window: <unknown>\nOther windows: []\n(focus probe failed: ${it.message?.take(160)})\n" }
+
+        print(summary)
+        if (noTree) return 0
+
+        println("--- component tree ---")
         val body = OkHttpClient().newCall(
-            Request.Builder().url("http://127.0.0.1:${state.port}/").build()
+            Request.Builder().url("http://127.0.0.1:${state.port}/").build(),
         ).execute().use { it.body?.string() ?: "" }
         print(body)
         return 0
