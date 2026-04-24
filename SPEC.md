@@ -67,7 +67,20 @@ internal to it.
 
 ### Observation
 
-- **`getState`** — print the full UI component tree (XML).
+- **`getState`** — print a focus summary (current window + other visible
+  windows) followed by the full UI component tree (XML). The summary
+  answers "where am I?"; the tree answers "what is there?". When
+  `Current window: <none>` appears, a native dialog or OS event has stolen
+  focus — subsequent clicks and keystrokes will silently go nowhere, and
+  the caller should call `focusWindow` before continuing.
+
+### Focus
+
+- **`focusWindow [--title <substring>]`** — bring a window to the front
+  and give it focus. Matches the first visible window whose title contains
+  `<substring>` (case-insensitive); with no `--title`, focuses the first
+  visible window. Prints `Focused: '<title>' (ClassName)` on success,
+  exits 1 on no match.
 
 ### Generic action / scripting
 

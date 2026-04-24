@@ -140,6 +140,7 @@ internal fun zipPluginDirectory(sourceDir: Path, destZip: Path) {
         ProjectCreateFromDialogCommand::class,
         SendKeyCommand::class,
         TypeTextCommand::class,
+        FocusWindowCommand::class,
     ],
 )
 class App
@@ -219,6 +220,7 @@ class RunIdeCommand : Callable<Int> {
 
         val remote = RemoteRobot("http://127.0.0.1:$port", http)
         waitFor(Duration.ofSeconds(timeoutSeconds), Duration.ofMillis(200)) {
+            check(process.isAlive) { "IDE process (pid=${process.pid()}) exited unexpectedly while waiting for robot-server on :$port" }
             val tcpOpen = try {
                 java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 200); true }
             } catch (_: Throwable) { false }
@@ -347,6 +349,67 @@ class ClickButtonCommand : Callable<Int> {
         if (all.size > 1) System.err.println("Warning: ${all.size} matches for $xp — clicking the first.")
         all.first().click()
         println("Clicked: $xp")
+        return 0
+    }
+}
+
+@Command(
+    name = "focusWindow",
+    description = ["Bring a window to the front and give it focus. Matches by title substring (case-insensitive). With no filter, focuses the first visible window."],
+)
+class FocusWindowCommand : Callable<Int> {
+    @Option(names = ["--title"], description = ["Case-insensitive title substring to match"])
+    var title: String? = null
+
+    override fun call(): Int {
+        val filter = title?.replace("'", "\\'") ?: ""
+        val r = connect()
+        val result = r.callJs<String>(
+            """
+            importClass(java.awt.Window);
+            importClass(java.awt.Frame);
+            importClass(java.awt.Dialog);
+            function describe(w) {
+                var t = (w instanceof Frame || w instanceof Dialog) ? String(w.getTitle() || "") : "";
+                return (t.length > 0 ? "'" + t + "' " : "") + "(" + w.getClass().getSimpleName() + ")";
+            }
+            var filter = '$filter';
+            var all = Window.getWindows();
+            var target = null;
+            for (var i = 0; i < all.length; i++) {
+                var w = all[i];
+                if (!w.isShowing()) continue;
+                if (filter.length > 0) {
+                    var t = (w instanceof Frame || w instanceof Dialog) ? String(w.getTitle() || "") : "";
+                    if (t.toLowerCase().indexOf(filter.toLowerCase()) < 0) continue;
+                }
+                target = w;
+                break;
+            }
+            if (target === null) "NO_MATCH";
+            else {
+                if (target instanceof Frame) target.setState(java.awt.Frame.NORMAL);
+                target.toFront();
+                target.requestFocus();
+                "Focused: " + describe(target);
+            }
+            """.trimIndent(),
+            true,
+        )
+        if (result == "NO_MATCH") {
+            System.err.println("No visible window matched${if (filter.isNotEmpty()) " title '$filter'" else ""}.")
+            return 1
+        }
+        // On macOS, Java's toFront/requestFocus can't steal OS-level focus from another app.
+        // Use osascript to activate the IntelliJ process at the OS level.
+        val state = requireRunningState()
+        runCatching {
+            ProcessBuilder(
+                "osascript", "-e",
+                "tell application \"System Events\" to set frontmost of first application process whose unix id is ${state.pid} to true",
+            ).start().waitFor()
+        }
+        println(result)
         return 0
     }
 }

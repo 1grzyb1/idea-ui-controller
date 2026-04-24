@@ -71,6 +71,7 @@ Each `runIde` call creates a **new** temp sandbox and installs only the plugins 
   <html>…
   ```
 - `clickButton --xpath=<xp>` (preferred) or `--text=<visible text>` — find and click.
+- `focusWindow [--title <substring>]` — bring a window to the front and give it focus. Matches the first visible window whose title contains `<substring>` (case-insensitive). Omit `--title` to focus the first visible window. Prints `Focused: '<title>' (ClassName)` on success; exits 1 if no match. Useful when `getState` shows `Current window: <none>` because a native dialog stole focus.
 - `runJs --script "..." [--edt]` — arbitrary robot runJs (no return).
 - `callJs --script "..." [--edt]` — arbitrary robot callJs (prints Serializable result).
 

@@ -3,6 +3,7 @@ package com.wkeska.ideauicontroller
 import com.intellij.remoterobot.RemoteRobot
 import com.intellij.remoterobot.fixtures.ComponentFixture
 import com.intellij.remoterobot.fixtures.ContainerFixture
+import com.intellij.remoterobot.search.locators.Locator
 import com.intellij.remoterobot.search.locators.byXpath
 import com.intellij.remoterobot.utils.waitFor
 import picocli.CommandLine.Command
@@ -13,15 +14,37 @@ import java.util.concurrent.Callable
 
 private fun xp(expr: String) = byXpath(expr)
 
+private fun <T : ComponentFixture> RemoteRobot.findAlive(type: Class<T>, locator: Locator, timeout: Duration): T {
+    val pid = State.load()?.pid
+    val deadline = System.nanoTime() + timeout.toNanos()
+    val chunkNs = Duration.ofSeconds(2).toNanos()
+    var last: Throwable = IllegalStateException("Timeout waiting for component")
+    while (System.nanoTime() < deadline) {
+        if (pid != null) {
+            check(ProcessHandle.of(pid).map { it.isAlive }.orElse(false)) {
+                "IDE process (pid=$pid) exited while waiting for component"
+            }
+        }
+        val remaining = deadline - System.nanoTime()
+        if (remaining <= 0) break
+        try {
+            return find(type, locator, Duration.ofNanos(minOf(remaining, chunkNs)))
+        } catch (e: Throwable) {
+            last = e
+        }
+    }
+    throw last
+}
+
 private fun RemoteRobot.welcomeFrame(timeout: Duration = Duration.ofSeconds(10)): ContainerFixture =
-    find(ContainerFixture::class.java, xp("//div[@class='FlatWelcomeFrame']"), timeout)
+    findAlive(ContainerFixture::class.java, xp("//div[@class='FlatWelcomeFrame']"), timeout)
 
 private fun RemoteRobot.ideFrame(timeout: Duration = Duration.ofSeconds(60)): ContainerFixture =
-    find(ContainerFixture::class.java, xp("//div[@class='IdeFrameImpl']"), timeout)
+    findAlive(ContainerFixture::class.java, xp("//div[@class='IdeFrameImpl']"), timeout)
 
 private fun RemoteRobot.editor(file: String?, timeout: Duration = Duration.ofSeconds(30)): ComponentFixture {
     if (file != null) {
-        val tab = find(
+        val tab = findAlive(
             ComponentFixture::class.java,
             xp("//div[@class='EditorTabs']//div[(@accessiblename='$file' or starts-with(@accessiblename,'$file,')) and @class='SimpleColoredComponent']"),
             timeout,
@@ -32,7 +55,7 @@ private fun RemoteRobot.editor(file: String?, timeout: Duration = Duration.ofSec
         xp("//div[@accessiblename='Editor for $file' and @class='EditorComponentImpl']")
     else
         xp("//div[@class='EditorComponentImpl']")
-    return find(ComponentFixture::class.java, loc, timeout)
+    return findAlive(ComponentFixture::class.java, loc, timeout)
 }
 
 private fun clickFixture(f: ComponentFixture) = f.click()
