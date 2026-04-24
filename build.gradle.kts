@@ -50,6 +50,7 @@ tasks.register("executable") {
     description = "Build a single self-executing file (stub + shadow jar)."
     dependsOn(tasks.shadowJar)
     inputs.property("javaHome", javaLauncher.map { it.metadata.installationPath.asFile.absolutePath })
+    inputs.file(tasks.shadowJar.flatMap { it.archiveFile })
     val outFile = layout.buildDirectory.file("libs/idea-ui-controller")
     outputs.file(outFile)
     doLast {
@@ -63,5 +64,22 @@ tasks.register("executable") {
         }
         out.setExecutable(true)
         println("Executable: ${out.absolutePath}")
+    }
+}
+
+tasks.register("install") {
+    group = "distribution"
+    description = "Build the executable and install it into \$HOME/.claude/skills/idea-ui-controller/ so Claude agents can invoke it by absolute path with no PATH setup."
+    dependsOn("executable")
+    val srcFile = layout.buildDirectory.file("libs/idea-ui-controller")
+    val destFile = File(System.getProperty("user.home"), ".claude/skills/idea-ui-controller/idea-ui-controller")
+    inputs.file(srcFile)
+    outputs.file(destFile)
+    doLast {
+        val src = srcFile.get().asFile
+        destFile.parentFile.mkdirs()
+        src.copyTo(destFile, overwrite = true)
+        destFile.setExecutable(true)
+        println("Installed: ${destFile.absolutePath}")
     }
 }

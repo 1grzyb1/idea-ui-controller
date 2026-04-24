@@ -35,11 +35,14 @@ This project has three tightly coupled pieces. A change to the CLI API (new subc
 
 **Build:**
 ```sh
-./gradlew executable          # produces build/libs/idea-ui-controller (self-executing fat jar)
-./gradlew shadowJar           # produces build/libs/idea-ui-controller-fat.jar
+./gradlew install             # rebuild + copy binary to ~/.claude/skills/idea-ui-controller/idea-ui-controller (the path SKILL.md documents)
+./gradlew executable          # only produce build/libs/idea-ui-controller (self-executing fat jar)
+./gradlew shadowJar           # only produce build/libs/idea-ui-controller-fat.jar
 ```
 
-**Runtime requirement:** Java 25. The fat-jar stub passes the required `--add-opens` flags automatically.
+After any CLI change, run `./gradlew install` — agents reading SKILL.md invoke the binary at its skill-folder path, so nothing takes effect until it's been copied there. `executable` declares the shadow jar as an input, so a stale stub is never silently left behind when sources change.
+
+**Runtime requirement:** Java 25. The fat-jar stub passes the required `--add-opens` flags automatically and hardcodes `JAVA_HOME` at build time — no env vars required to run the CLI.
 
 **State:** `~/.idea-ui-controller/state.properties` — holds `pid`, `port`, `sandbox` of the running daemon. One IDE at a time.
 
@@ -53,7 +56,7 @@ This project has three tightly coupled pieces. A change to the CLI API (new subc
 **File:** `.claude/skills/idea-ui-controller/SKILL.md`
 
 This is the single source of truth Claude uses when operating the CLI. It covers:
-- Prerequisites (Java 25, binary on PATH, IDE path format)
+- Prerequisites (Java 25 bundled, binary at `~/.claude/skills/idea-ui-controller/idea-ui-controller`, IDE path format)
 - Startup time expectations
 - Sandbox lifecycle
 - Full command catalog with flags and descriptions

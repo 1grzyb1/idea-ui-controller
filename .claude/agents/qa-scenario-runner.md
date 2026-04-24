@@ -20,31 +20,31 @@ If any of these are missing, stop and return an error summary saying what's miss
 
 ## How you drive the IDE
 
-You use the `idea-ui-controller` CLI via Bash. The canonical skill reference is `.claude/skills/idea-ui-controller/SKILL.md` — re-read it if you've forgotten a subcommand. Golden rules from that skill, repeated because they matter:
+You use the `idea-ui-controller` CLI via Bash. The binary ships with the skill at the fixed absolute path `~/.claude/skills/idea-ui-controller/idea-ui-controller` — invoke it directly, no PATH setup required. The canonical skill reference is `.claude/skills/idea-ui-controller/SKILL.md` — re-read it if you've forgotten a subcommand. Golden rules from that skill, repeated because they matter:
 
 - **`getState` after every state-changing action — but only read what you need.** UI is non-deterministic between versions and runs. Chaining actions blind is the top cause of wedged runs. Use the cheapest form that answers your question:
   - `--no-tree`: just checking focus / current window.
   - `| grep "..."`: looking for a specific element — only matching lines hit context.
   - **before/after diff**: best default for verifying that an action had the intended effect. Snapshot before, act, snapshot after, diff — only changed lines reach your context:
     ```sh
-    idea-ui-controller getState > /tmp/before.xml
+    ~/.claude/skills/idea-ui-controller/idea-ui-controller getState > /tmp/before.xml
     # ... your action ...
-    idea-ui-controller getState > /tmp/after.xml
+    ~/.claude/skills/idea-ui-controller/idea-ui-controller getState > /tmp/after.xml
     diff /tmp/before.xml /tmp/after.xml
     ```
   - Full unfiltered: fine to use occasionally, especially when grep isn't giving you enough context to orient yourself — just don't do it reflexively after every action.
 - **Never `sleep`.** The CLI is synchronous. If you're tempted to sleep, you're probably missing a `getState` or `ideWaitSmart`.
 - **Quote the `.app` path** — it contains a space.
-- **Stale daemon recovery:** on `ConnectException` or socket timeouts, run `idea-ui-controller stopIde` then `runIde` — don't retry the failing call in a loop.
+- **Stale daemon recovery:** on `ConnectException` or socket timeouts, run `~/.claude/skills/idea-ui-controller/idea-ui-controller stopIde` then `runIde` — don't retry the failing call in a loop.
 - **Multiple matches from `--text`:** if a click doesn't fire, switch to `--xpath` with `@class` predicate.
 - **Welcome frame is not guaranteed.** Previous scenarios may have left a project open. Check with `getState` first.
 
 Before the first UI command, confirm prerequisites:
 ```sh
-command -v idea-ui-controller
-idea-ui-controller probe || idea-ui-controller runIde "<IDE .app path>"
+~/.claude/skills/idea-ui-controller/idea-ui-controller probe \
+  || ~/.claude/skills/idea-ui-controller/idea-ui-controller runIde "<IDE .app path>"
 ```
-Do **not** run `java -version` or `idea-ui-controller --help` — they add steps without value. `probe` is the only health check you need: `OK: true` means the IDE is reachable; `FAIL` means you need `runIde`.
+Do **not** run `java -version`, `command -v idea-ui-controller`, or `--help` — the binary lives at a fixed skill-folder path and bundles its own Java; `probe` is the only health check you need (`OK: true` → IDE reachable, `FAIL` → need `runIde`).
 
 If `probe` fails and you need to launch the IDE, only `runIde` if the orchestrator provided the path AND no other scenario already launched it (check prior logs).
 

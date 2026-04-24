@@ -192,13 +192,21 @@ existing project composes from the primitives above (`clickButton` on
 autocomplete timeouts — `sendKey --key ENTER`, plus the usual Trust Project
 + onboarding-dismiss steps).
 
-## Build
+## Build & installation
+
+The binary ships with the skill, not with the user's `PATH`. Consumers
+invoke it via the fixed absolute path
+`~/.claude/skills/idea-ui-controller/idea-ui-controller`, documented in
+SKILL.md, so no shell setup is ever required.
 
 - `./gradlew shadowJar` — `build/libs/idea-ui-controller-fat.jar`.
 - `./gradlew executable` — self-executing stub at
   `build/libs/idea-ui-controller`. The stub hardcodes the Java 25 path at
   build time (resolved via the Gradle toolchain) so callers never need to
   set `JAVA_HOME` or `PATH` to invoke it.
+- `./gradlew install` — runs `executable` and copies the resulting binary
+  into the skill folder at the path above. After any CLI change, a single
+  `install` makes the new build live for the agents.
 
 ## Non-goals
 

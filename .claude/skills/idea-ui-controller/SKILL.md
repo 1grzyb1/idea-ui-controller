@@ -11,12 +11,21 @@ The underlying library is JetBrains' **[intellij-ui-test-robot](https://github.c
 
 ## Prerequisites — verify before any run
 
-1. **`idea-ui-controller` on PATH** — the binary produced by `./gradlew executable` embeds the correct Java 25 path at build time, so no `export JAVA_HOME` is ever needed. Verify it resolves and the IDE is reachable:
-   ```sh
-   command -v idea-ui-controller          # must resolve
-   idea-ui-controller probe               # OK: true → IDE already running; FAIL → need runIde
+1. **The binary ships with this skill.** The `install` Gradle task places a self-contained fat-jar executable at a fixed absolute path next to this `SKILL.md`:
    ```
-   Do **not** run `--help` or `java -version` as a pre-flight check — they add noise and `probe` already tells you everything you need to know about readiness.
+   ~/.claude/skills/idea-ui-controller/idea-ui-controller
+   ```
+   No `PATH` setup, no `JAVA_HOME`, no env vars — the stub hardcodes the Java 25 path at build time. Invoke it directly by absolute path; all examples below do the same. Verify readiness with one round-trip:
+   ```sh
+   ~/.claude/skills/idea-ui-controller/idea-ui-controller probe   # OK: true → IDE already running; FAIL → need runIde
+   ```
+   Do **not** run `--help` or `java -version` as a pre-flight — they add noise and `probe` already tells you everything you need.
+
+   If the binary is missing or stale, rebuild from the source repo (`~/IdeaProjects/idea-ui-controller/`):
+   ```sh
+   cd ~/IdeaProjects/idea-ui-controller && ./gradlew install
+   ```
+   `install` rebuilds the fat-jar, regenerates the stub, and copies it into the skill folder.
 
 2. **A built IDE to target.** The IDE path you pass to `runIde` must be a real IntelliJ-family `.app` bundle on macOS (directory ending in `.app`) or the equivalent unpacked distribution directory on Linux/Windows. Example of the correct shape:
    ```
@@ -117,15 +126,15 @@ Each `runIde` call creates a **new** temp sandbox and installs only the plugins 
 
 **Opening an existing project** (no dedicated command yet — do these steps manually):
 ```sh
-idea-ui-controller clickButton --xpath "//div[@accessiblename='Open' and @class='JButton']"
+~/.claude/skills/idea-ui-controller/idea-ui-controller clickButton --xpath "//div[@accessiblename='Open' and @class='JButton']"
 # use runJs --edt to set the path — do NOT use typeText (autocomplete timeouts)
-idea-ui-controller runJs --edt --script "java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner().setText('/your/project/path');"
-idea-ui-controller sendKey --key ENTER
+~/.claude/skills/idea-ui-controller/idea-ui-controller runJs --edt --script "java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner().setText('/your/project/path');"
+~/.claude/skills/idea-ui-controller/idea-ui-controller sendKey --key ENTER
 # Trust Project dialog always appears on first open of a project in the sandbox
-idea-ui-controller clickButton --xpath "//div[@accessiblename='Trust Project' and @class='JButton']"
+~/.claude/skills/idea-ui-controller/idea-ui-controller clickButton --xpath "//div[@accessiblename='Trust Project' and @class='JButton']"
 # "Meet the Islands Theme" onboarding panel reliably appears after every project open — always dismiss it
-idea-ui-controller actionLinkClickByText --text "Skip"
-idea-ui-controller ideWaitSmart
+~/.claude/skills/idea-ui-controller/idea-ui-controller actionLinkClickByText --text "Skip"
+~/.claude/skills/idea-ui-controller/idea-ui-controller ideWaitSmart
 ```
 - `createScratchFile --name X.ext [--language LANG] [--content "..."]` — creates a scratch file via `ScratchRootType` and opens it. Requires a project to be open (`ideVerify`). `--language` is an IntelliJ Language ID (e.g. `kotlin`, `JAVA`, `Python`); defaults to plain text. Note: scratches don't live under the project directory — they're stored under the IDE's config dir (in our case the CLI's sandbox: `<sandbox>/config*/scratches/`).
 
@@ -133,21 +142,21 @@ idea-ui-controller ideWaitSmart
 
 ```sh
 IDE="/Users/wkeska/IdeaProjects/ideavim/out/ide-tests/cache/builds/IU-261.23567.71/IntelliJ IDEA.app"
-idea-ui-controller runIde "$IDE"              # ~60s cold, ~10s warm
-idea-ui-controller welcomeVerify               # → "Welcome frame present."
-idea-ui-controller welcomeNewProject           # clicks the New Project button
-idea-ui-controller dialogVerify --title "New Project"
-idea-ui-controller stopIde
+~/.claude/skills/idea-ui-controller/idea-ui-controller runIde "$IDE"              # ~60s cold, ~10s warm
+~/.claude/skills/idea-ui-controller/idea-ui-controller welcomeVerify               # → "Welcome frame present."
+~/.claude/skills/idea-ui-controller/idea-ui-controller welcomeNewProject           # clicks the New Project button
+~/.claude/skills/idea-ui-controller/idea-ui-controller dialogVerify --title "New Project"
+~/.claude/skills/idea-ui-controller/idea-ui-controller stopIde
 ```
 
 ## Example flow — read editor text after an action
 
 ```sh
 # (IDE already running with a project open)
-idea-ui-controller editorOpen --file "Main.kt"
-before=$(idea-ui-controller editorGetText --file "Main.kt")
+~/.claude/skills/idea-ui-controller/idea-ui-controller editorOpen --file "Main.kt"
+before=$(~/.claude/skills/idea-ui-controller/idea-ui-controller editorGetText --file "Main.kt")
 # ... trigger an action via actionMenuItem, a keystroke via runJs, etc. ...
-after=$(idea-ui-controller editorGetText --file "Main.kt")
+after=$(~/.claude/skills/idea-ui-controller/idea-ui-controller editorGetText --file "Main.kt")
 diff <(echo "$before") <(echo "$after")
 ```
 
@@ -156,15 +165,15 @@ diff <(echo "$before") <(echo "$after")
 When the xpath for a control isn't known, pipe `getState` directly into `grep` — only the matching lines reach your context, not the full tree:
 
 ```sh
-idea-ui-controller getState | grep -n "accessiblename=\"[^\"]*Settings" | head
+~/.claude/skills/idea-ui-controller/idea-ui-controller getState | grep -n "accessiblename=\"[^\"]*Settings" | head
 # pick an xpath from the surrounding attrs in the matched lines:
-idea-ui-controller clickButton --xpath "//div[@accessiblename='Settings' and @class='JButton']"
+~/.claude/skills/idea-ui-controller/idea-ui-controller clickButton --xpath "//div[@accessiblename='Settings' and @class='JButton']"
 ```
 
 If you need to search several times over the same snapshot, capture first and grep from the file:
 
 ```sh
-idea-ui-controller getState > /tmp/ui.xml
+~/.claude/skills/idea-ui-controller/idea-ui-controller getState > /tmp/ui.xml
 grep -n "accessiblename" /tmp/ui.xml | head
 grep -n "class=\"JButton\"" /tmp/ui.xml | head
 ```
@@ -172,9 +181,9 @@ grep -n "class=\"JButton\"" /tmp/ui.xml | head
 ## Example flow — IdeaVim-specific introspection via callJs
 
 ```sh
-idea-ui-controller editorIsBlockCursor --file "Main.kt"   # uses platform caret API, works without IdeaVim on classpath
-idea-ui-controller editorCaretShape --file "Main.kt"      # BLOCK / BAR / UNDERSCORE / DEFAULT
-idea-ui-controller callJs --script "com.maddyhome.idea.vim.VimPlugin.getState().toString()"
+~/.claude/skills/idea-ui-controller/idea-ui-controller editorIsBlockCursor --file "Main.kt"   # uses platform caret API, works without IdeaVim on classpath
+~/.claude/skills/idea-ui-controller/idea-ui-controller editorCaretShape --file "Main.kt"      # BLOCK / BAR / UNDERSCORE / DEFAULT
+~/.claude/skills/idea-ui-controller/idea-ui-controller callJs --script "com.maddyhome.idea.vim.VimPlugin.getState().toString()"
 ```
 
 Any script valid as a `RemoteRobot.callJs` body works — full Java reflection is available via Rhino. See the intellij-ui-test-robot docs for the sandbox.
@@ -183,14 +192,14 @@ Any script valid as a `RemoteRobot.callJs` body works — full Java reflection i
 
 ```sh
 # IDE already running with a project + scratch file focused
-idea-ui-controller sendKey --key ESCAPE       # ensure normal mode
-idea-ui-controller editorMoveToLine --line 1
-idea-ui-controller typeText --text "dd"       # delete line 1
-idea-ui-controller typeText --text "u"        # undo
-idea-ui-controller typeText --text "i"        # enter insert mode
-idea-ui-controller typeText --text "hello\n"  # type "hello" + Enter
-idea-ui-controller sendKey --key ESCAPE       # back to normal
-idea-ui-controller editorGetText              # verify result
+~/.claude/skills/idea-ui-controller/idea-ui-controller sendKey --key ESCAPE       # ensure normal mode
+~/.claude/skills/idea-ui-controller/idea-ui-controller editorMoveToLine --line 1
+~/.claude/skills/idea-ui-controller/idea-ui-controller typeText --text "dd"       # delete line 1
+~/.claude/skills/idea-ui-controller/idea-ui-controller typeText --text "u"        # undo
+~/.claude/skills/idea-ui-controller/idea-ui-controller typeText --text "i"        # enter insert mode
+~/.claude/skills/idea-ui-controller/idea-ui-controller typeText --text "hello\n"  # type "hello" + Enter
+~/.claude/skills/idea-ui-controller/idea-ui-controller sendKey --key ESCAPE       # back to normal
+~/.claude/skills/idea-ui-controller/idea-ui-controller editorGetText              # verify result
 ```
 
 `typeText` is for printable chars and the common escapes (`\n`, `\t`, `\r`). Use `sendKey` for anything else — `ESCAPE`, `F1`, `LEFT`, `BACK_SPACE`, etc.
@@ -200,19 +209,19 @@ idea-ui-controller editorGetText              # verify result
 - **Run `getState` between every UI action — but choose the right form.** The live UI is not deterministic across versions or between runs — dialogs shift, focus moves, indexing kicks in. After every `clickButton` / `welcome*` / `actionMenuItem` / `dialogClickButton` / any state-changing call, re-observe the UI before deciding the next step. Chaining actions blind is the fastest way to wedge. Pick the cheapest form that answers your question:
   - **`getStateSummary` is the default post-action observation.** It prints the focus summary (current + other windows) followed by a compact flat list of every interactive element visible right now — buttons, text fields, checkboxes, menus, lists, trees, dialogs — each with its ready-to-use xpath. One call gives you everything you need to pick the next action, at a fraction of the context cost of the raw tree. Use it after every state-changing action as your standard "what do I have in front of me?" check. You can also pipe it through grep when you need to narrow further:
     ```sh
-    idea-ui-controller getStateSummary                      # default: full interactive summary
-    idea-ui-controller getStateSummary | grep "Trust\|Open"  # filter to specific elements
+    ~/.claude/skills/idea-ui-controller/idea-ui-controller getStateSummary                      # default: full interactive summary
+    ~/.claude/skills/idea-ui-controller/idea-ui-controller getStateSummary | grep "Trust\|Open"  # filter to specific elements
     ```
   - `getState --no-tree` — **focus-only check.** Returns current window + other visible windows, nothing else. Use only when all you need to answer is "which window has focus?" (e.g. confirming `focusWindow` worked). Do not use when you need to find or act on any element.
   - `getState` (full tree, raw XML) — **fallback for unknown layouts.** Use when `getStateSummary` isn't giving you enough context — e.g. you need to understand containment (is this button inside a toolbar or a dialog?), find a component class that isn't in the interactive-element allowlist, or diagnose why an xpath isn't matching. Pipe through grep rather than reading the whole output raw:
     ```sh
-    idea-ui-controller getState | grep -n "accessiblename\|class=\"JButton\"" | head -20
-    idea-ui-controller getState > /tmp/ui.xml && grep -n "BorderlessTextField" /tmp/ui.xml
+    ~/.claude/skills/idea-ui-controller/idea-ui-controller getState | grep -n "accessiblename\|class=\"JButton\"" | head -20
+    ~/.claude/skills/idea-ui-controller/idea-ui-controller getState > /tmp/ui.xml && grep -n "BorderlessTextField" /tmp/ui.xml
     ```
 - **`Current window: <none>` means focus loss — act on it immediately.** If `getState` reports `Current window: <none>`, the IDE window is unfocused (a native dialog, OS event, or prior action stole it). Any keyboard or click action you send next will silently go nowhere. **Stop, call `focusWindow` (optionally `--title <substring>` to target a specific window), then call `getState` again to confirm focus is restored before continuing.** Do not skip this step and do not assume the next action will work anyway.
 - **Multiple matches.** `clickButton --text` can match several components (e.g. a `JButton` and its child `JBLabel` both carry the label text). The CLI clicks the first match and prints a warning. When the action doesn't fire, add `--xpath` with a `@class` predicate: `"//div[@accessiblename='New Project' and @class='JButton']"`.
 - **Quoting paths with spaces.** Always quote the `.app` path — it contains a space (`IntelliJ IDEA.app`).
-- **Idempotency / stale state recovery.** `runIde` refuses to start a second IDE if one is registered. If a command errors with a connection failure (`ConnectException`, socket timeout), the daemon may be dead while `state.properties` still points at it. Recover with `idea-ui-controller stopIde` (it tolerates a stale state) then `runIde` again.
+- **Idempotency / stale state recovery.** `runIde` refuses to start a second IDE if one is registered. If a command errors with a connection failure (`ConnectException`, socket timeout), the daemon may be dead while `state.properties` still points at it. Recover with `~/.claude/skills/idea-ui-controller/idea-ui-controller stopIde` (it tolerates a stale state) then `runIde` again.
 - **State file.** Read/write at `~/.idea-ui-controller/state.properties`. Contains `pid`, `port`, `sandbox`.
 - **Prefer clicks and keystrokes over scripts.** When you can achieve a goal through the IDE's own UI — menu items, buttons, keyboard shortcuts, dialogs — do that instead of reaching for `callJs`/`runJs`. UI-path actions exercise the real feature surface and are more likely to catch regressions. Reserve scripts for things the UI cannot expose: reading internal state, triggering non-interactive platform APIs, or recovering from a wedged state where no UI path is available.
 - **`runJs` + EDT footgun.** Never call long-running or EDT-blocking operations directly (`ProjectUtil.openOrImport`, full project indexing triggers, modal dialogs spun on the EDT) from a `runJs` with `--edt` — they starve the robot-server and wedge the IDE. Wrap them in `ApplicationManager.getApplication().invokeLater(...)` or use a background task. `WriteAction.run(...)` inside `invokeAndWait(...)` is fine for short write-path edits (that's what `createScratchFile` / `editorInjectText` do).
@@ -223,7 +232,7 @@ idea-ui-controller editorGetText              # verify result
 
 - **`typeText` in autocomplete / file-chooser fields causes partial-text timeout.** `typeText` fires keystrokes one at a time. In any field that triggers live autocomplete or file-system lookups on each keystroke (file chooser `BorderlessTextField`, path inputs), the synchronous I/O on every character can time out the robot-server socket mid-string. The visible effect: if the field had selected text when `typeText` started, the first keystroke replaces the selection, then typing continues until the socket times out — leaving only the tail of the intended string in the field. **Fix:** use `runJs --edt` with `getFocusOwner().setText(...)` to bypass keystroke simulation entirely:
   ```sh
-  idea-ui-controller runJs --edt --script \
+  ~/.claude/skills/idea-ui-controller/idea-ui-controller runJs --edt --script \
     "java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner().setText('/your/path/here');"
   ```
 
