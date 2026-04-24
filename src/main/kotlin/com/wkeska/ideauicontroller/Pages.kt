@@ -586,6 +586,44 @@ class ListSelectCommand : Callable<Int> {
     }
 }
 
+@Command(name = "treeSelect", description = ["Select a row in a JTree by index or display text (last path component toString)."])
+class TreeSelectCommand : Callable<Int> {
+    @Option(names = ["--xpath"], required = true, description = ["Locator for the JTree."])
+    lateinit var xpath: String
+    @Option(names = ["--index"], description = ["Zero-based row index."]) var index: Int = -1
+    @Option(names = ["--text"], description = ["Match first row whose last path component toString equals this."]) var text: String? = null
+    @Option(names = ["--timeout-seconds"]) var timeoutSeconds: Long = 10
+
+    override fun call(): Int {
+        require((index >= 0) xor (text != null)) { "Provide exactly one of --index or --text" }
+        val r = connect()
+        val tree = r.find(ComponentFixture::class.java, xp(xpath), Duration.ofSeconds(timeoutSeconds))
+        val script = if (text != null) {
+            val esc = jsEscape(text!!)
+            """
+            var rowCount = component.getRowCount();
+            var idx = -1;
+            for (var i = 0; i < rowCount; i++) {
+                var tp = component.getPathForRow(i);
+                if (tp === null) continue;
+                var last = tp.getLastPathComponent();
+                if (last !== null && String(last.toString()) === '$esc') { idx = i; break; }
+            }
+            if (idx < 0) throw new java.lang.RuntimeException("no tree row matching '$esc'");
+            component.setSelectionRow(idx);
+            component.scrollRowToVisible(idx);
+            """.trimIndent()
+        } else {
+            """
+            component.setSelectionRow($index);
+            component.scrollRowToVisible($index);
+            """.trimIndent()
+        }
+        r.runJs(tree, script, true)
+        return 0
+    }
+}
+
 internal fun RemoteRobot.setFieldByLabel(label: String, text: String) {
     val escLabel = jsEscape(label)
     val escText = jsEscape(text)
@@ -746,6 +784,42 @@ class TypeTextCommand : Callable<Int> {
                 else robot.type(cc);
                 if (i + 1 < s.length) java.lang.Thread.sleep($delayMs);
             }
+            """.trimIndent(),
+            false,
+        )
+        return 0
+    }
+}
+
+@Command(
+    name = "sendKeyCombo",
+    description = [
+        "Dispatch a modifier+key combination to the focused window via the AWT robot.",
+        "Key is a VK_* constant without the VK_ prefix (case-insensitive). --modifier may be repeated.",
+        "Examples: --key S --modifier META  (Cmd+S),  --key Z --modifier META --modifier SHIFT  (Cmd+Shift+Z).",
+    ],
+)
+class SendKeyComboCommand : Callable<Int> {
+    @Option(names = ["--key"], required = true, description = ["VK_* constant name without the VK_ prefix (e.g. S, Z, ENTER)."])
+    lateinit var key: String
+    @Option(names = ["--modifier"], description = ["Modifier key(s): META, CTRL, SHIFT, ALT. May be repeated."])
+    var modifiers: List<String> = emptyList()
+
+    override fun call(): Int {
+        fun resolveVk(name: String): Int = try {
+            java.awt.event.KeyEvent::class.java.getField("VK_${name.uppercase()}").getInt(null)
+        } catch (_: NoSuchFieldException) {
+            error("Unknown key '$name'. Use a VK_* constant name without the VK_ prefix, e.g. S, ENTER, F5.")
+        }
+        val mainVk = resolveVk(key)
+        val modVks = modifiers.map { resolveVk(it) }
+        val press = modVks.joinToString("\n") { "robot.pressKey($it);" }
+        val release = modVks.reversed().joinToString("\n") { "robot.releaseKey($it);" }
+        connect().runJs(
+            """
+            $press
+            robot.pressAndReleaseKey($mainVk);
+            $release
             """.trimIndent(),
             false,
         )

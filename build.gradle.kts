@@ -41,21 +41,24 @@ tasks.shadowJar {
     mergeServiceFiles()
 }
 
-val stubScript = """#!/bin/sh
-exec java --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED -jar "${'$'}0" "${'$'}@"
-"""
+val javaLauncher = javaToolchains.launcherFor {
+    languageVersion = JavaLanguageVersion.of(25)
+}
 
 tasks.register("executable") {
     group = "distribution"
     description = "Build a single self-executing file (stub + shadow jar)."
     dependsOn(tasks.shadowJar)
+    inputs.property("javaHome", javaLauncher.map { it.metadata.installationPath.asFile.absolutePath })
     val outFile = layout.buildDirectory.file("libs/idea-ui-controller")
     outputs.file(outFile)
     doLast {
+        val javaHome = javaLauncher.get().metadata.installationPath.asFile.absolutePath
+        val stub = "#!/bin/sh\nJAVA_HOME=\"$javaHome\"\nPATH=\"\$JAVA_HOME/bin:\$PATH\"\nexec java --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED -jar \"\$0\" \"\$@\"\n"
         val jar = tasks.shadowJar.get().archiveFile.get().asFile
         val out = outFile.get().asFile
         out.outputStream().use { os ->
-            os.write(stubScript.toByteArray())
+            os.write(stub.toByteArray())
             jar.inputStream().use { it.copyTo(os) }
         }
         out.setExecutable(true)

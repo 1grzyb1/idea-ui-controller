@@ -11,21 +11,13 @@ The underlying library is JetBrains' **[intellij-ui-test-robot](https://github.c
 
 ## Prerequisites — verify before any run
 
-1. **Java 25** must be the active JVM. The CLI won't start on older JDKs.
-   ```sh
-   java -version   # must show 25.x
-   # if not:
-   export JAVA_HOME=/Users/wkeska/Library/Java/JavaVirtualMachines/openjdk-25.0.2/Contents/Home
-   export PATH="$JAVA_HOME/bin:$PATH"
-   ```
-
-2. **`idea-ui-controller` on PATH.** It's a single self-extracting shell/jar produced by the project's `./gradlew executable` task (at `~/IdeaProjects/idea-ui-controller/build/libs/idea-ui-controller`). Add that directory to PATH or symlink it into a PATH dir.
+1. **`idea-ui-controller` on PATH** — the binary produced by `./gradlew executable` embeds the correct Java 25 path at build time, so no `export JAVA_HOME` is ever needed. Verify it resolves:
    ```sh
    command -v idea-ui-controller   # must resolve
    idea-ui-controller --help       # must print the command list
    ```
 
-3. **A built IDE to target.** The IDE path you pass to `runIde` must be a real IntelliJ-family `.app` bundle on macOS (directory ending in `.app`) or the equivalent unpacked distribution directory on Linux/Windows. Example of the correct shape:
+2. **A built IDE to target.** The IDE path you pass to `runIde` must be a real IntelliJ-family `.app` bundle on macOS (directory ending in `.app`) or the equivalent unpacked distribution directory on Linux/Windows. Example of the correct shape:
    ```
    /Users/wkeska/IdeaProjects/ideavim/out/ide-tests/cache/builds/IU-261.23567.71/IntelliJ IDEA.app
    ```
@@ -33,7 +25,7 @@ The underlying library is JetBrains' **[intellij-ui-test-robot](https://github.c
 
    **Discover the real path before launching.** The Gradle cache sometimes prefixes the build dir (e.g. `___IU-261.23567.71/` while a toolchain lock is held). Always run `ls <project>/out/ide-tests/cache/builds/` and use the exact directory name you see.
 
-4. **Plugin-under-test must be prepared.** If you're driving a plugin you're developing (the common case), the IDE referenced above needs to already have the plugin compiled and installed into a sandbox. In projects that use the `org.jetbrains.intellij.platform` Gradle plugin, run once before invoking the skill:
+3. **Plugin-under-test must be prepared.** If you're driving a plugin you're developing (the common case), the IDE referenced above needs to already have the plugin compiled and installed into a sandbox. In projects that use the `org.jetbrains.intellij.platform` Gradle plugin, run once before invoking the skill:
    ```sh
    ./gradlew prepareSandbox   # builds target IDE + installs plugin into a sandbox
    # or
@@ -88,9 +80,10 @@ Each `runIde` call creates a **new** temp sandbox and installs only the plugins 
 - `editorMoveToLine --line N` (1-based)
 
 **Keyboard (focused window)**
-- `sendKey --key <VK_NAME> [--count N] [--delay-ms M]` — dispatch a named key via the AWT robot. `--key` takes a `java.awt.event.KeyEvent.VK_*` constant name **without the `VK_` prefix** (case-insensitive): `ESCAPE`, `ENTER`, `TAB`, `BACK_SPACE`, `LEFT`, `F1`, etc. `--count` repeats with `--delay-ms` between presses. Use for named keys and for Vim commands like `Esc`.
-- `typeText --text "..." [--delay-ms M]` — type a literal string one char at a time. Supports `\n`, `\t`, `\r`, `\\` escapes; `\n` and `\r` map to VK_ENTER, `\t` to VK_TAB. Use for Vim commands composed of printable chars (`dd`, `yyp`, `gg`), insert-mode content entry, etc.
-- Both target the **focused** window — ensure the right editor/dialog has focus first (`editorOpen` / `clickButton` as needed).
+- `sendKey --key <VK_NAME> [--count N] [--delay-ms M]` — dispatch a named key via the AWT robot. `--key` takes a `java.awt.event.KeyEvent.VK_*` constant name **without the `VK_` prefix** (case-insensitive): `ESCAPE`, `ENTER`, `TAB`, `BACK_SPACE`, `LEFT`, `F1`, etc. `--count` repeats with `--delay-ms` between presses. Use for named keys and for Vim commands like `Esc`. **No modifier support** — for combos use `sendKeyCombo`.
+- `sendKeyCombo --key <VK_NAME> [--modifier MOD]...` — dispatch a modifier+key combination. `--modifier` may be repeated: `META`, `CTRL`, `SHIFT`, `ALT`. Examples: `--key S --modifier META` (Cmd+S), `--key Z --modifier META --modifier SHIFT` (Cmd+Shift+Z). Modifiers are pressed in order, main key fires, modifiers release in reverse order.
+- `typeText --text "..." [--delay-ms M]` — type a literal string one char at a time. Supports `\n`, `\t`, `\r`, `\\` escapes; `\n` and `\r` map to VK_ENTER, `\t` to VK_TAB. Use for Vim commands composed of printable chars (`dd`, `yyp`, `gg`), insert-mode content entry, etc. **Footgun — do not use in autocomplete/file-chooser fields:** see Known footguns below.
+- All three target the **focused** window — ensure the right editor/dialog has focus first (`editorOpen` / `clickButton` as needed).
 
 **Main IDE frame**
 - `ideVerify` · `ideProjectName` · `ideIsSmart` · `ideWaitSmart`
@@ -104,7 +97,8 @@ Each `runIde` call creates a **new** temp sandbox and installs only the plugins 
 - `gutterVerify`
 
 **Widgets (generic)**
-- `listSelect --xpath "<locator for the JList>" (--index N | --text "...")` — select a JBList/JList row.
+- `listSelect --xpath "<locator for the JList>" (--index N | --text "...")` — select a JBList/JList row. **JList only** — fails on `JTree` components (e.g. the Project tool window tree); use `treeSelect` for those.
+- `treeSelect --xpath "<locator for the JTree>" (--index N | --text "...")` — select a row in a JTree by zero-based index or by its last path component's `toString()`. Use for the Project tool window tree and any other `JTree`-backed widget. After selecting a node, trigger actions on it via keyboard shortcut (e.g. `sendKeyCombo --key INSERT --modifier ALT` for Alt+Insert / New).
 - `textFieldSet --label "..." --text "..."` — set a JTextComponent whose `labelFor` is the given JLabel.
 - `checkboxSet --text "..." --checked true --checked false` — click a JCheckBox only if its current state differs. `--checked` requires an explicit value: `true` or `false`.
 - `actionLinkClickByText --text "Skip"` — click an `ActionLink` by its visible text. Handy for dismissing onboarding panels.
@@ -137,13 +131,20 @@ diff <(echo "$before") <(echo "$after")
 
 ## Example flow — exploring an unknown UI
 
-When the xpath for a control isn't known, dump the tree and grep for an anchor like `accessiblename` or `text`:
+When the xpath for a control isn't known, pipe `getState` directly into `grep` — only the matching lines reach your context, not the full tree:
+
+```sh
+idea-ui-controller getState | grep -n "accessiblename=\"[^\"]*Settings" | head
+# pick an xpath from the surrounding attrs in the matched lines:
+idea-ui-controller clickButton --xpath "//div[@accessiblename='Settings' and @class='JButton']"
+```
+
+If you need to search several times over the same snapshot, capture first and grep from the file:
 
 ```sh
 idea-ui-controller getState > /tmp/ui.xml
-grep -n "accessiblename=\"[^\"]*Settings" /tmp/ui.xml | head
-# pick an xpath from surrounding attrs:
-idea-ui-controller clickButton --xpath "//div[@accessiblename='Settings' and @class='JButton']"
+grep -n "accessiblename" /tmp/ui.xml | head
+grep -n "class=\"JButton\"" /tmp/ui.xml | head
 ```
 
 ## Example flow — IdeaVim-specific introspection via callJs
@@ -174,13 +175,39 @@ idea-ui-controller editorGetText              # verify result
 
 ## Tips for agent use
 
-- **Run `getState` between every UI action.** The live UI is not deterministic across versions or between runs — dialogs shift, focus moves, indexing kicks in. After every `clickButton` / `welcome*` / `actionMenuItem` / `dialogClickButton` / any state-changing call, re-observe the UI (`getState`, or a narrower probe like `dialogTitle` / `ideVerify` / `editorVerify`) before deciding the next step. Chaining actions blind is the fastest way to wedge.
+- **Run `getState` between every UI action — but choose the right form.** The live UI is not deterministic across versions or between runs — dialogs shift, focus moves, indexing kicks in. After every `clickButton` / `welcome*` / `actionMenuItem` / `dialogClickButton` / any state-changing call, re-observe the UI before deciding the next step. Chaining actions blind is the fastest way to wedge. Pick the cheapest form that answers your question:
+  - `getState --no-tree` — **focus check only.** Returns current window + other visible windows. Use when you only need to answer "where am I?" or confirm focus after `focusWindow`. Do not use when you need to find or verify any UI element.
+  - `getState | grep -n "..."` — **targeted lookup.** Pipes the full tree through grep so only matching lines reach your context. Use when you know what you're looking for (an `accessiblename`, a button text, a class name). This is the default for most post-action checks.
+  - `getState` (full, unfiltered) — **open-ended discovery.** Use when grep isn't giving you enough context to orient yourself or when you're in truly unfamiliar UI territory. Fine to reach for occasionally — just not as the default after every action.
+  - **before/after diff** — **action-effect check.** Snapshot the tree before an action, perform the action, snapshot again, then diff. Only the changed lines reach your context — far cheaper than reading either full tree:
+    ```sh
+    idea-ui-controller getState > /tmp/before.xml
+    idea-ui-controller clickButton --text "OK"
+    idea-ui-controller getState > /tmp/after.xml
+    diff /tmp/before.xml /tmp/after.xml
+    ```
+    Use this whenever you want to confirm what an action actually changed (a dialog closed, a new panel appeared, a checkbox toggled) without having to parse the whole tree.
+- **`Current window: <none>` means focus loss — act on it immediately.** If `getState` reports `Current window: <none>`, the IDE window is unfocused (a native dialog, OS event, or prior action stole it). Any keyboard or click action you send next will silently go nowhere. **Stop, call `focusWindow` (optionally `--title <substring>` to target a specific window), then call `getState` again to confirm focus is restored before continuing.** Do not skip this step and do not assume the next action will work anyway.
 - **Multiple matches.** `clickButton --text` can match several components (e.g. a `JButton` and its child `JBLabel` both carry the label text). The CLI clicks the first match and prints a warning. When the action doesn't fire, add `--xpath` with a `@class` predicate: `"//div[@accessiblename='New Project' and @class='JButton']"`.
 - **Quoting paths with spaces.** Always quote the `.app` path — it contains a space (`IntelliJ IDEA.app`).
 - **Idempotency / stale state recovery.** `runIde` refuses to start a second IDE if one is registered. If a command errors with a connection failure (`ConnectException`, socket timeout), the daemon may be dead while `state.properties` still points at it. Recover with `idea-ui-controller stopIde` (it tolerates a stale state) then `runIde` again.
 - **State file.** Read/write at `~/.idea-ui-controller/state.properties`. Contains `pid`, `port`, `sandbox`.
+- **Prefer clicks and keystrokes over scripts.** When you can achieve a goal through the IDE's own UI — menu items, buttons, keyboard shortcuts, dialogs — do that instead of reaching for `callJs`/`runJs`. UI-path actions exercise the real feature surface and are more likely to catch regressions. Reserve scripts for things the UI cannot expose: reading internal state, triggering non-interactive platform APIs, or recovering from a wedged state where no UI path is available.
 - **`runJs` + EDT footgun.** Never call long-running or EDT-blocking operations directly (`ProjectUtil.openOrImport`, full project indexing triggers, modal dialogs spun on the EDT) from a `runJs` with `--edt` — they starve the robot-server and wedge the IDE. Wrap them in `ApplicationManager.getApplication().invokeLater(...)` or use a background task. `WriteAction.run(...)` inside `invokeAndWait(...)` is fine for short write-path edits (that's what `createScratchFile` / `editorInjectText` do).
 - **Do NOT `sleep`.** The CLI is synchronous — every subcommand blocks until it finishes. External waits are pure waste.
+- **`callJs` top-level context.** In a bare `callJs` or `runJs` script (no component fixture), the variables `robot`, `component`, and `by` are **not** available — they only exist inside component-fixture-scoped closures. Use `java.awt.*` APIs directly (e.g. `java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner()`) or the scoped `runJs(fixture, script)` form when you need them.
+
+## Known footguns
+
+- **`typeText` in autocomplete / file-chooser fields causes partial-text timeout.** `typeText` fires keystrokes one at a time. In any field that triggers live autocomplete or file-system lookups on each keystroke (file chooser `BorderlessTextField`, path inputs), the synchronous I/O on every character can time out the robot-server socket mid-string. The visible effect: if the field had selected text when `typeText` started, the first keystroke replaces the selection, then typing continues until the socket times out — leaving only the tail of the intended string in the field. **Fix:** use `runJs --edt` with `getFocusOwner().setText(...)` to bypass keystroke simulation entirely:
+  ```sh
+  idea-ui-controller runJs --edt --script \
+    "java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner().setText('/your/path/here');"
+  ```
+
+- **`sendKey` has no modifier support.** `sendKey --key A` types `a`, it does not select-all. For any Ctrl/Cmd/Shift/Alt combo, use `sendKeyCombo`. To save a file: `sendKeyCombo --key S --modifier META`. To select-all: `sendKeyCombo --key A --modifier META`.
+
+- **`listSelect` crashes on JTree.** It calls `.getSize()` which is a `JList` method. The Project tool window tree is a `JTree` — use `treeSelect` instead.
 
 ## When NOT to use
 

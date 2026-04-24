@@ -44,20 +44,6 @@ echo
 echo "Done."
 echo
 
-# Runtime sanity: the binary needs Java 25 on PATH to run (build can use any JDK 17+).
-if java -version 2>&1 | head -1 | grep -qE '"25\.'; then
-  echo "Java on PATH: $(java -version 2>&1 | head -1)"
-else
-  cat <<EOF
-Warning: Java 25 is not the active runtime on PATH. The binary requires
-Java 25 to run. Current: $(java -version 2>&1 | head -1 || echo "java not found")
-
-To use the tool, set a JDK 25 as active, e.g.:
-    export JAVA_HOME=\$(/usr/libexec/java_home -v 25 2>/dev/null || echo /path/to/jdk-25)
-    export PATH="\$JAVA_HOME/bin:\$PATH"
-EOF
-fi
-
 # PATH hint
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;

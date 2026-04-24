@@ -118,10 +118,15 @@ ActionLinkFixture, Gutter).
 - `sendKey --key <VK_NAME> [--count N] [--delay-ms M]` — dispatch a named
   key via the AWT robot. `--key` takes a `java.awt.event.KeyEvent.VK_*`
   constant name without the `VK_` prefix (case-insensitive): `ESCAPE`,
-  `ENTER`, `TAB`, `BACK_SPACE`, `LEFT`, `F1`, …
+  `ENTER`, `TAB`, `BACK_SPACE`, `LEFT`, `F1`, … No modifier support — use
+  `sendKeyCombo` for combos.
+- `sendKeyCombo --key <VK_NAME> [--modifier MOD]...` — dispatch a modifier
+  + key combination. `--modifier` may be repeated: `META`, `CTRL`, `SHIFT`,
+  `ALT`. Modifiers press in order, the main key fires, modifiers release
+  in reverse.
 - `typeText --text "..." [--delay-ms M]` — type a literal string one
   character at a time. Supports `\n`, `\t`, `\r`, `\\` escapes.
-- Both target the focused window — callers must ensure the correct
+- All three target the focused window — callers must ensure the correct
   editor/dialog has focus first.
 
 **Main IDE frame** — `ideVerify`, `ideProjectName`, `ideIsSmart`,
@@ -136,7 +141,12 @@ ActionLinkFixture, Gutter).
 - `gutterVerify`.
 
 **Generic widgets**
-- `listSelect --xpath <JList-locator> (--index N | --text "...")`.
+- `listSelect --xpath <JList-locator> (--index N | --text "...")` — JList
+  only; fails on `JTree`.
+- `treeSelect --xpath <JTree-locator> (--index N | --text "...")` — select
+  a row in a `JTree` by zero-based index or by the last path component's
+  `toString()`. Used for the Project tool window tree and any other
+  tree-backed widget.
 - `textFieldSet --label "..." --text "..."`.
 - `checkboxSet --text "..." --checked (true|false)`.
 - `actionLinkClickByText --text "..."`.
@@ -148,15 +158,13 @@ ActionLinkFixture, Gutter).
 - **`createScratchFile --name X.ext [--language LANG] [--content "..."]`** —
   create + open a scratch file via `ScratchRootType`.
 
-## Installation
-
-`scripts/install.sh` builds the executable and places it on a predictable
-path so the skill/agents can invoke it by name.
-
 ## Build
 
 - `./gradlew shadowJar` — `build/libs/idea-ui-controller-fat.jar`.
-- `./gradlew executable` — self-executing stub at `build/libs/idea-ui-controller`.
+- `./gradlew executable` — self-executing stub at
+  `build/libs/idea-ui-controller`. The stub hardcodes the Java 25 path at
+  build time (resolved via the Gradle toolchain) so callers never need to
+  set `JAVA_HOME` or `PATH` to invoke it.
 
 ## Non-goals
 

@@ -139,8 +139,10 @@ internal fun zipPluginDirectory(sourceDir: Path, destZip: Path) {
         ActionLinkClickByTextCommand::class,
         ProjectCreateFromDialogCommand::class,
         SendKeyCommand::class,
+        SendKeyComboCommand::class,
         TypeTextCommand::class,
         FocusWindowCommand::class,
+        TreeSelectCommand::class,
     ],
 )
 class App
