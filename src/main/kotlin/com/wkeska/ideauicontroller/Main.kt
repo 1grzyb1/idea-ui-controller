@@ -102,6 +102,8 @@ internal fun zipPluginDirectory(sourceDir: Path, destZip: Path) {
         GetStateCommand::class,
         GetStateSummaryCommand::class,
         ScreenshotCommand::class,
+        ParseScreenshotCommand::class,
+        ClickAtCommand::class,
         ClickButtonCommand::class,
         ProbeCommand::class,
         RunJsCommand::class,
@@ -450,6 +452,103 @@ class ScreenshotCommand : Callable<Int> {
         val img = connect().getScreenshot()
         javax.imageio.ImageIO.write(img, "PNG", outPath.toFile())
         println(outPath.absolutePathString())
+        return 0
+    }
+}
+
+@Command(
+    name = "parseScreenshot",
+    description = [
+        "Take a screenshot of the IDE and run OmniParser v2 locally (MPS on Apple Silicon, or CPU).",
+        "Outputs a JSON array of detected UI elements: [{id, type, label, x1, y1, x2, y2, cx, cy, w, h}].",
+        "Coordinates are screen-absolute pixels. Pass cx/cy directly to clickAt.",
+        "Models (~39 MB total) are downloaded on first run to ~/.local/lib/idea-ui-controller/models/.",
+        "Requires scripts/install.sh to have been run (sets up the Python venv + dependencies).",
+    ],
+)
+class ParseScreenshotCommand : Callable<Int> {
+    @Option(names = ["--output", "-o"], description = ["Save the screenshot PNG to this path (default: temp file deleted after parse)."])
+    var output: Path? = null
+
+    @Option(names = ["--threshold"], description = ["YOLO confidence threshold (default: 0.05)."])
+    var threshold: Double = 0.05
+
+    @Option(names = ["--device"], description = ["Inference device: auto|mps|cpu|cuda (default: auto)."])
+    var device: String = "auto"
+
+    @Option(names = ["--debug"], description = ["Print detection details to stderr."])
+    var debug: Boolean = false
+
+    override fun call(): Int {
+        val helperPath = Path.of(System.getProperty("user.home"), ".local/lib/idea-ui-controller/omniparse.py")
+        if (!helperPath.exists()) {
+            System.err.println("error: omniparse.py not found at $helperPath. Re-run scripts/install.sh to install it.")
+            return 1
+        }
+
+        val outPath = output ?: Files.createTempFile("idea-ui-controller-screenshot-", ".png")
+        val deleteAfter = output == null
+
+        try {
+            val img = connect().getScreenshot()
+            javax.imageio.ImageIO.write(img, "PNG", outPath.toFile())
+
+            val venvPython = helperPath.parent.resolve("venv/bin/python3")
+            val python = if (venvPython.exists()) venvPython.absolutePathString() else "python3"
+
+            val cmd = buildList {
+                addAll(listOf(python, helperPath.absolutePathString()))
+                add(outPath.absolutePathString())
+                addAll(listOf("--threshold", threshold.toString()))
+                addAll(listOf("--device", device))
+                if (debug) add("--debug")
+            }
+
+            val proc = ProcessBuilder(cmd).redirectErrorStream(false).start()
+            val errThread = Thread { proc.errorStream.copyTo(System.err) }.also { it.isDaemon = true; it.start() }
+            val json = proc.inputStream.bufferedReader().readText()
+            val exitCode = proc.waitFor()
+            errThread.join(2_000)
+
+            if (exitCode != 0) {
+                System.err.println("error: omniparse.py exited with code $exitCode")
+                return 1
+            }
+            print(json)
+            return 0
+        } finally {
+            if (deleteAfter) outPath.toFile().delete()
+        }
+    }
+}
+
+@Command(
+    name = "clickAt",
+    description = [
+        "Click at an absolute pixel coordinate on the screen via the AWT robot.",
+        "Use cx/cy values from parseScreenshot output to interact with elements identified by OmniParser.",
+    ],
+)
+class ClickAtCommand : Callable<Int> {
+    @Parameters(index = "0", description = ["X coordinate in pixels (screen-absolute)."])
+    var x: Int = 0
+
+    @Parameters(index = "1", description = ["Y coordinate in pixels (screen-absolute)."])
+    var y: Int = 0
+
+    override fun call(): Int {
+        connect().runJs(
+            """
+            importClass(java.awt.Point);
+            importClass(org.assertj.swing.core.MouseButton);
+            var p = new Point($x, $y);
+            robot.moveMouse(p);
+            robot.pressMouse(MouseButton.LEFT_BUTTON);
+            robot.releaseMouse(MouseButton.LEFT_BUTTON);
+            """.trimIndent(),
+            false,
+        )
+        println("Clicked at ($x, $y)")
         return 0
     }
 }

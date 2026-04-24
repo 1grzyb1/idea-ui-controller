@@ -86,6 +86,21 @@ internal to it.
   elements that cannot be identified through the component tree (canvas
   renders, icons with no accessible name, visually broken layouts).
   `getStateSummary` remains the default observation.
+- **`parseScreenshot [--output PATH] [--threshold N] [--device auto|mps|cpu|cuda] [--debug]`** —
+  screenshot + local OmniParser v2 inference in one step. Runs YOLO
+  detection + Florence-2 captioning (MPS on Apple Silicon, CPU elsewhere)
+  against the captured image and prints a JSON array of detected UI
+  elements with screen-absolute pixel coordinates:
+  ```json
+  [{"id":0,"type":"icon","label":"Settings","x1":10,"y1":20,"x2":50,"y2":60,"cx":30,"cy":40,"w":40,"h":40}, …]
+  ```
+  The `cx`/`cy` fields feed directly into `clickAt`. First run downloads
+  ~500 MB of models to `~/.local/lib/idea-ui-controller/models/`;
+  subsequent runs are fully offline. Requires `scripts/install.sh` to
+  have been run to set up the Python environment.
+- **`clickAt <x> <y>`** — click at an absolute screen pixel via the AWT
+  robot. Designed to consume `cx`/`cy` from `parseScreenshot` output so
+  callers can interact with elements identified only visually.
 
 ### Focus
 

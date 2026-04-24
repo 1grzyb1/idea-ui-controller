@@ -65,6 +65,12 @@ Each `runIde` call creates a **new** temp sandbox and installs only the plugins 
   <html>…
   ```
 - `screenshot [--output PATH]` — capture what the robot-server sees and save it as a PNG; prints the output path. **Last-resort fallback only** — use `getStateSummary` for all normal observation. Only reach for this when a visual element cannot be identified through the component tree (e.g. a canvas render, an icon with no accessible name, diagnosing a visually broken layout). After running it, read the file at the printed path to interpret it visually.
+- `parseScreenshot [--output PATH] [--threshold N] [--device auto|mps|cpu|cuda] [--debug]` — screenshot + local OmniParser v2 inference in one step. Takes a screenshot, runs YOLO detection + Florence-2 captioning locally (MPS on Apple Silicon, CPU elsewhere), and prints a JSON array of detected UI elements:
+  ```json
+  [{"id":0,"type":"icon","label":"Settings","x1":10,"y1":20,"x2":50,"y2":60,"cx":30,"cy":40,"w":40,"h":40}, ...]
+  ```
+  All coordinates are screen-absolute pixels (full-screen capture). Pass `cx`/`cy` directly to `clickAt`. First run downloads ~500 MB of models (YOLO + Florence-2-base) to `~/.local/lib/idea-ui-controller/models/`; subsequent runs are fully offline. Requires `scripts/install.sh` to have been run. Use when `getStateSummary` can't identify an element (visual-only icons, canvas regions).
+- `clickAt <x> <y>` — click at an absolute pixel coordinate via the AWT robot. Use `cx`/`cy` from `parseScreenshot` output to interact with elements that were identified visually. Example: `idea-ui-controller clickAt 150 300`.
 - `clickButton --xpath=<xp>` (preferred) or `--text=<visible text>` — find and click.
 - `focusWindow [--title <substring>]` — bring a window to the front and give it focus. Matches the first visible window whose title contains `<substring>` (case-insensitive). Omit `--title` to focus the first visible window. Prints `Focused: '<title>' (ClassName)` on success; exits 1 if no match. Useful when `getState` shows `Current window: <none>` because a native dialog stole focus.
 - `runJs --script "..." [--edt]` — arbitrary robot runJs (no return).
