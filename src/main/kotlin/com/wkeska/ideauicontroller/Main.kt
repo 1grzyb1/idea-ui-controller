@@ -171,6 +171,8 @@ class ProbeCommand : Callable<Int> {
     }
 }
 
+// Isolated sandbox per run — no display server, no shared state, safe to invoke on every PR
+// in parallel across plugin projects. Blocks until the IDE is reachable, then returns.
 @Command(name = "runIde", description = ["Launch an IDE with the robot-server plugin and register it as the active daemon."])
 class RunIdeCommand : Callable<Int> {
     @Parameters(index = "0", description = ["Path to the IDE (e.g. /Applications/IntelliJ IDEA.app)"])
@@ -352,6 +354,9 @@ class GetStateCommand : Callable<Int> {
     }
 }
 
+// Converts the raw component tree (~10 000 lines of XML) into a compact, structured element
+// list (~15 lines) with ready-to-use xpaths. Keeps agent context consumption minimal and
+// enables tight observe-act loops without raw tree parsing.
 @Command(
     name = "getStateSummary",
     description = [
@@ -456,6 +461,10 @@ class ScreenshotCommand : Callable<Int> {
     }
 }
 
+// Extends agent-readable context beyond the accessibility tree to every pixel on screen.
+// Elements with no accessible name — toolbar icons, canvas widgets, visual-only indicators
+// — become agent-operable through YOLO detection + Florence-2 captioning, with clickAt
+// acting on the returned coordinates.
 @Command(
     name = "parseScreenshot",
     description = [
