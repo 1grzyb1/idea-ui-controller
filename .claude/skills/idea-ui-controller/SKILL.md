@@ -47,6 +47,14 @@ The underlying library is JetBrains' **[intellij-ui-test-robot](https://github.c
 - **Subsequent runs on the same machine: ~10 seconds.** The plugin is cached; only IDE cold start matters.
 - The IDE stays running as a daemon across CLI invocations. Only `stopIde` (or killing the process) tears it down. State is kept at `~/.idea-ui-controller/state.properties`.
 
+## Sandbox is fresh on every `runIde`
+
+Each `runIde` call creates a **new** temp sandbox and installs only the plugins passed on *that* command. It does NOT carry plugins forward from a prior daemon. Consequences:
+
+- If the plugin you're testing (e.g. IdeaVim) lived in the last sandbox only because you passed `--plugin` then, you MUST pass `--plugin` again on every relaunch — otherwise the plugin is absent and any JS that references its classes fails with `TypeError: ... is not a function, it is "object"`.
+- Pass an unpacked plugin directory (the one produced under `<your-plugin-project>/build/idea-sandbox/.../plugins_runIdeForUiTests/<PluginName>`) or a built `.zip`. Directory form is auto-zipped for you.
+- If the daemon is already alive (`probe` returns `OK: true`), prefer reusing it over `stopIde` + `runIde` — you skip the 10+ seconds of cold-start and avoid the plugin-install step entirely.
+
 ## Command catalog
 
 **Daemon lifecycle**
@@ -72,9 +80,16 @@ The underlying library is JetBrains' **[intellij-ui-test-robot](https://github.c
 
 **Editor** (all take optional `--file <tab-title>`; omit to target the first `EditorComponentImpl`)
 - `editorVerify` · `editorOpen --file X` (clicks the tab)
-- `editorGetText` · `editorGetSelectedText` · `editorCaretOffset` · `editorCaretCount` · `editorIsBlockCursor`
+- `editorGetText` · `editorGetSelectedText` · `editorCaretOffset` · `editorCaretCount`
+- `editorIsBlockCursor` — true for BLOCK/UNDERSCORE shape (Vim normal mode); false for BAR (insert) and DEFAULT (no Vim). Uses the IntelliJ platform caret API — no IdeaVim reflection.
+- `editorCaretShape` — raw shape name: `BLOCK`, `UNDERSCORE`, `BAR`, or `DEFAULT`. Use when you need to distinguish Vim-normal (BLOCK) from Vim-ex or OS-specific variants.
 - `editorInjectText --text "..."` (replaces document via write action)
 - `editorMoveToLine --line N` (1-based)
+
+**Keyboard (focused window)**
+- `sendKey --key <VK_NAME> [--count N] [--delay-ms M]` — dispatch a named key via the AWT robot. `--key` takes a `java.awt.event.KeyEvent.VK_*` constant name **without the `VK_` prefix** (case-insensitive): `ESCAPE`, `ENTER`, `TAB`, `BACK_SPACE`, `LEFT`, `F1`, etc. `--count` repeats with `--delay-ms` between presses. Use for named keys and for Vim commands like `Esc`.
+- `typeText --text "..." [--delay-ms M]` — type a literal string one char at a time. Supports `\n`, `\t`, `\r`, `\\` escapes; `\n` and `\r` map to VK_ENTER, `\t` to VK_TAB. Use for Vim commands composed of printable chars (`dd`, `yyp`, `gg`), insert-mode content entry, etc.
+- Both target the **focused** window — ensure the right editor/dialog has focus first (`editorOpen` / `clickButton` as needed).
 
 **Main IDE frame**
 - `ideVerify` · `ideProjectName` · `ideIsSmart` · `ideWaitSmart`
@@ -133,11 +148,28 @@ idea-ui-controller clickButton --xpath "//div[@accessiblename='Settings' and @cl
 ## Example flow — IdeaVim-specific introspection via callJs
 
 ```sh
-idea-ui-controller editorIsBlockCursor --file "Main.kt"
+idea-ui-controller editorIsBlockCursor --file "Main.kt"   # uses platform caret API, works without IdeaVim on classpath
+idea-ui-controller editorCaretShape --file "Main.kt"      # BLOCK / BAR / UNDERSCORE / DEFAULT
 idea-ui-controller callJs --script "com.maddyhome.idea.vim.VimPlugin.getState().toString()"
 ```
 
 Any script valid as a `RemoteRobot.callJs` body works — full Java reflection is available via Rhino. See the intellij-ui-test-robot docs for the sandbox.
+
+## Example flow — drive Vim commands by keystroke
+
+```sh
+# IDE already running with a project + scratch file focused
+idea-ui-controller sendKey --key ESCAPE       # ensure normal mode
+idea-ui-controller editorMoveToLine --line 1
+idea-ui-controller typeText --text "dd"       # delete line 1
+idea-ui-controller typeText --text "u"        # undo
+idea-ui-controller typeText --text "i"        # enter insert mode
+idea-ui-controller typeText --text "hello\n"  # type "hello" + Enter
+idea-ui-controller sendKey --key ESCAPE       # back to normal
+idea-ui-controller editorGetText              # verify result
+```
+
+`typeText` is for printable chars and the common escapes (`\n`, `\t`, `\r`). Use `sendKey` for anything else — `ESCAPE`, `F1`, `LEFT`, `BACK_SPACE`, etc.
 
 ## Tips for agent use
 

@@ -17,7 +17,9 @@ and RPC primitives (`callJs`, `runJs`) come from there.
 - **State file.** `~/.idea-ui-controller/state.properties` holds the active
   daemon's `pid`, `port`, and sandbox directory.
 - **Sandbox.** Every `runIde` creates a fresh temp sandbox directory,
-  installs the robot-server plugin into it, and tears it down on `stopIde`.
+  installs the robot-server plugin (plus any `--plugin` archives) into it,
+  and tears it down on `stopIde`. Sandboxes are **not** carried forward
+  between daemons — callers must pass `--plugin` on every relaunch.
 - **Exit codes.** `0` = success, non-zero = failure.
 - **Synchronous.** Every subcommand blocks until its action has completed on
   the IDE side. Callers must not insert their own `sleep`s.
@@ -89,9 +91,25 @@ ActionLinkFixture, Gutter).
 `EditorComponentImpl`):
 - `editorVerify`, `editorOpen --file X`.
 - `editorGetText`, `editorGetSelectedText`, `editorCaretOffset`,
-  `editorCaretCount`, `editorIsBlockCursor`.
+  `editorCaretCount`.
+- `editorIsBlockCursor` — `true` for BLOCK/UNDERSCORE shapes (Vim normal
+  mode); `false` for BAR (insert) and DEFAULT (no Vim). Uses the IntelliJ
+  platform caret API — no IdeaVim reflection.
+- `editorCaretShape` — raw shape name (`BLOCK`, `UNDERSCORE`, `BAR`,
+  `DEFAULT`) for callers who need to distinguish Vim-normal from Vim-ex
+  or OS-specific variants.
 - `editorInjectText --text "..."` — write-action replace.
 - `editorMoveToLine --line N` — 1-based.
+
+**Keyboard (focused window)**
+- `sendKey --key <VK_NAME> [--count N] [--delay-ms M]` — dispatch a named
+  key via the AWT robot. `--key` takes a `java.awt.event.KeyEvent.VK_*`
+  constant name without the `VK_` prefix (case-insensitive): `ESCAPE`,
+  `ENTER`, `TAB`, `BACK_SPACE`, `LEFT`, `F1`, …
+- `typeText --text "..." [--delay-ms M]` — type a literal string one
+  character at a time. Supports `\n`, `\t`, `\r`, `\\` escapes.
+- Both target the focused window — callers must ensure the correct
+  editor/dialog has focus first.
 
 **Main IDE frame** — `ideVerify`, `ideProjectName`, `ideIsSmart`,
 `ideWaitSmart`.

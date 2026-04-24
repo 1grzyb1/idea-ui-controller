@@ -117,6 +117,7 @@ internal fun zipPluginDirectory(sourceDir: Path, destZip: Path) {
         EditorCaretOffsetCommand::class,
         EditorCaretCountCommand::class,
         EditorIsBlockCursorCommand::class,
+        EditorCaretShapeCommand::class,
         EditorInjectTextCommand::class,
         EditorMoveToLineCommand::class,
         IdeVerifyCommand::class,
@@ -137,6 +138,8 @@ internal fun zipPluginDirectory(sourceDir: Path, destZip: Path) {
         CreateScratchFileCommand::class,
         ActionLinkClickByTextCommand::class,
         ProjectCreateFromDialogCommand::class,
+        SendKeyCommand::class,
+        TypeTextCommand::class,
     ],
 )
 class App

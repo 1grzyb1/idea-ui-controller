@@ -228,14 +228,23 @@ class EditorCaretCountCommand : EditorScopedOptions(), Callable<Int> {
     }
 }
 
-@Command(name = "editorIsBlockCursor", description = ["Print true/false for block/underscore caret (IdeaVim)."])
+@Command(
+    name = "editorIsBlockCursor",
+    description = [
+        "Print true/false for a block/underscore caret shape. True indicates a Vim-style normal-mode caret; false covers BAR (insert) and DEFAULT (no Vim).",
+    ],
+)
 class EditorIsBlockCursorCommand : EditorScopedOptions(), Callable<Int> {
     override fun call(): Int {
         val r = connect()
         val e = r.editor(file, Duration.ofSeconds(timeoutSeconds))
         val v = r.callJs<Boolean>(
             e,
-            "com.maddyhome.idea.vim.helper.CaretVisualAttributesHelperKt.hasBlockOrUnderscoreCaret(component.getEditor())",
+            """
+            var shape = component.getEditor().getCaretModel().getPrimaryCaret().getVisualAttributes().getShape();
+            var name = String(shape.name());
+            name === 'BLOCK' || name === 'UNDERSCORE';
+            """.trimIndent(),
             true,
         )
         println(v)
@@ -243,13 +252,37 @@ class EditorIsBlockCursorCommand : EditorScopedOptions(), Callable<Int> {
     }
 }
 
-@Command(name = "editorInjectText", description = ["Replace editor document text via a write action."])
+@Command(
+    name = "editorCaretShape",
+    description = ["Print the primary caret's visual shape name: BLOCK, UNDERSCORE, BAR, or DEFAULT."],
+)
+class EditorCaretShapeCommand : EditorScopedOptions(), Callable<Int> {
+    override fun call(): Int {
+        val r = connect()
+        val e = r.editor(file, Duration.ofSeconds(timeoutSeconds))
+        val v = r.callJs<String>(
+            e,
+            "String(component.getEditor().getCaretModel().getPrimaryCaret().getVisualAttributes().getShape().name());",
+            true,
+        )
+        println(v)
+        return 0
+    }
+}
+
+@Command(
+    name = "editorInjectText",
+    description = [
+        "Replace editor document text via a write action.",
+        "Interprets \\n, \\t, \\r, \\\\ in --text so shell-quoted arguments can carry newlines and tabs.",
+    ],
+)
 class EditorInjectTextCommand : EditorScopedOptions(), Callable<Int> {
     @Option(names = ["--text", "-t"], required = true) lateinit var text: String
     override fun call(): Int {
         val r = connect()
         val e = r.editor(file, Duration.ofSeconds(timeoutSeconds))
-        val escaped = text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
+        val escaped = jsEscape(interpretEscapes(text))
         r.runJs(
             e,
             """
@@ -476,6 +509,24 @@ private fun jsEscape(s: String) = s
     .replace("\n", "\\n")
     .replace("\r", "\\r")
 
+// Interprets \n, \t, \r, \\ in a user-supplied string so shell-quoted arguments can carry newlines and tabs.
+// Unknown escape sequences (e.g. \x) pass through verbatim.
+private fun interpretEscapes(s: String): String = buildString {
+    var i = 0
+    while (i < s.length) {
+        val c = s[i]
+        if (c == '\\' && i + 1 < s.length) {
+            when (s[i + 1]) {
+                'n' -> { append('\n'); i += 2; continue }
+                't' -> { append('\t'); i += 2; continue }
+                'r' -> { append('\r'); i += 2; continue }
+                '\\' -> { append('\\'); i += 2; continue }
+            }
+        }
+        append(c); i++
+    }
+}
+
 @Command(name = "listSelect", description = ["Select an item in a JBList/JList by index or display text."])
 class ListSelectCommand : Callable<Int> {
     @Option(names = ["--xpath"], required = true, description = ["Locator for the JList."])
@@ -606,6 +657,79 @@ class DialogClickButtonCommand : Callable<Int> {
     }
 }
 
+// ---------- Keyboard primitives (focused window) ----------
+
+@Command(
+    name = "sendKey",
+    description = [
+        "Dispatch a named key to the focused window via the AWT robot.",
+        "Name is the KeyEvent VK_* constant without the VK_ prefix (case-insensitive): ESCAPE, ENTER, TAB, BACK_SPACE, F1, LEFT, etc.",
+    ],
+)
+class SendKeyCommand : Callable<Int> {
+    @Option(names = ["--key"], required = true, description = ["VK_* constant name without the VK_ prefix (e.g. ESCAPE)."])
+    lateinit var key: String
+    @Option(names = ["--count"], description = ["Repeat count (default 1)."])
+    var count: Int = 1
+    @Option(names = ["--delay-ms"], description = ["Sleep between repeats in ms (default 60)."])
+    var delayMs: Long = 60
+
+    override fun call(): Int {
+        require(count >= 1) { "--count must be >= 1" }
+        val fieldName = "VK_${key.uppercase()}"
+        val vk = try {
+            java.awt.event.KeyEvent::class.java.getField(fieldName).getInt(null)
+        } catch (_: NoSuchFieldException) {
+            error("Unknown key '$key'. Use a VK_* constant name without the VK_ prefix, e.g. ESCAPE, ENTER, F1.")
+        }
+        connect().runJs(
+            """
+            for (var i = 0; i < $count; i++) {
+                robot.pressAndReleaseKey($vk);
+                if (i + 1 < $count) java.lang.Thread.sleep($delayMs);
+            }
+            """.trimIndent(),
+            false,
+        )
+        return 0
+    }
+}
+
+@Command(
+    name = "typeText",
+    description = [
+        "Type a literal string into the focused window via the AWT robot (one char at a time).",
+        "Interprets \\n, \\t, \\r, and \\\\ escapes. Newline maps to VK_ENTER, tab to VK_TAB; other chars go through robot.type().",
+    ],
+)
+class TypeTextCommand : Callable<Int> {
+    @Option(names = ["--text", "-t"], required = true, description = ["Literal text (supports \\n, \\t, \\r, \\\\ escapes)."])
+    lateinit var text: String
+    @Option(names = ["--delay-ms"], description = ["Sleep between keystrokes in ms (default 50)."])
+    var delayMs: Long = 50
+
+    override fun call(): Int {
+        val resolved = interpretEscapes(text)
+        val esc = jsEscape(resolved)
+        connect().runJs(
+            """
+            importClass(java.awt.event.KeyEvent);
+            var s = '$esc';
+            for (var i = 0; i < s.length; i++) {
+                var cc = s.charAt(i);
+                if (cc === '\n') robot.pressAndReleaseKey(KeyEvent.VK_ENTER);
+                else if (cc === '\t') robot.pressAndReleaseKey(KeyEvent.VK_TAB);
+                else if (cc === '\r') robot.pressAndReleaseKey(KeyEvent.VK_ENTER);
+                else robot.type(cc);
+                if (i + 1 < s.length) java.lang.Thread.sleep($delayMs);
+            }
+            """.trimIndent(),
+            false,
+        )
+        return 0
+    }
+}
+
 // ---------- High-level flows ----------
 
 @Command(name = "actionLinkClickByText", description = ["Click an ActionLink by its visible text (e.g. onboarding 'Skip')."])
@@ -680,14 +804,14 @@ class CreateScratchFileCommand : Callable<Int> {
     lateinit var name: String
     @Option(names = ["--language"], description = ["IntelliJ Language ID (e.g. 'kotlin', 'JAVA'). Default: plain text."])
     var language: String = "TEXT"
-    @Option(names = ["--content"], description = ["Initial text."])
+    @Option(names = ["--content"], description = ["Initial text. Interprets \\n, \\t, \\r, \\\\ escapes."])
     var content: String = ""
 
     override fun call(): Int {
         val r = connect()
         val frame = r.ideFrame()
         val escName = jsEscape(name)
-        val escContent = jsEscape(content)
+        val escContent = jsEscape(interpretEscapes(content))
         val escLang = jsEscape(language)
         r.runJs(
             frame,
