@@ -64,6 +64,7 @@ Each `runIde` call creates a **new** temp sandbox and installs only the plugins 
   --- component tree ---
   <html>…
   ```
+- `screenshot [--output PATH]` — capture what the robot-server sees and save it as a PNG; prints the output path. **Last-resort fallback only** — use `getStateSummary` for all normal observation. Only reach for this when a visual element cannot be identified through the component tree (e.g. a canvas render, an icon with no accessible name, diagnosing a visually broken layout). After running it, read the file at the printed path to interpret it visually.
 - `clickButton --xpath=<xp>` (preferred) or `--text=<visible text>` — find and click.
 - `focusWindow [--title <substring>]` — bring a window to the front and give it focus. Matches the first visible window whose title contains `<substring>` (case-insensitive). Omit `--title` to focus the first visible window. Prints `Focused: '<title>' (ClassName)` on success; exits 1 if no match. Useful when `getState` shows `Current window: <none>` because a native dialog stole focus.
 - `runJs --script "..." [--edt]` — arbitrary robot runJs (no return).

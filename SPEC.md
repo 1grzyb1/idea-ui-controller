@@ -81,6 +81,11 @@ internal to it.
   `Current window: <none>` appears, a native dialog or OS event has stolen
   focus — subsequent clicks and keystrokes will silently go nowhere, and
   the caller should call `focusWindow` before continuing.
+- **`screenshot [--output PATH]`** — capture what the robot-server sees
+  and save it as a PNG; prints the output path. Last-resort fallback for
+  elements that cannot be identified through the component tree (canvas
+  renders, icons with no accessible name, visually broken layouts).
+  `getStateSummary` remains the default observation.
 
 ### Focus
 

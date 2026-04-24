@@ -101,6 +101,7 @@ internal fun zipPluginDirectory(sourceDir: Path, destZip: Path) {
         StopIdeCommand::class,
         GetStateCommand::class,
         GetStateSummaryCommand::class,
+        ScreenshotCommand::class,
         ClickButtonCommand::class,
         ProbeCommand::class,
         RunJsCommand::class,
@@ -428,6 +429,27 @@ class GetStateSummaryCommand : Callable<Int> {
             count++
         }
         if (count == 0) println("(no interactive elements found)")
+        return 0
+    }
+}
+
+@Command(
+    name = "screenshot",
+    description = [
+        "Capture the IDE using the robot-server's built-in screenshot and save it to a PNG. Prints the output path.",
+        "Last-resort fallback — use getStateSummary for normal observation.",
+        "Only reach for this when a visual element cannot be found through the component tree.",
+    ],
+)
+class ScreenshotCommand : Callable<Int> {
+    @Option(names = ["--output", "-o"], description = ["Output path for the PNG (default: auto temp file)."])
+    var output: Path? = null
+
+    override fun call(): Int {
+        val outPath = output ?: Files.createTempFile("idea-ui-controller-screenshot-", ".png")
+        val img = connect().getScreenshot()
+        javax.imageio.ImageIO.write(img, "PNG", outPath.toFile())
+        println(outPath.absolutePathString())
         return 0
     }
 }
