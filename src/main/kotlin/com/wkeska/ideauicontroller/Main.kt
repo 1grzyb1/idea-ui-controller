@@ -100,6 +100,7 @@ internal fun zipPluginDirectory(sourceDir: Path, destZip: Path) {
         RunIdeCommand::class,
         StopIdeCommand::class,
         GetStateCommand::class,
+        GetStateSummaryCommand::class,
         ClickButtonCommand::class,
         ProbeCommand::class,
         RunJsCommand::class,
@@ -191,11 +192,14 @@ class RunIdeCommand : Callable<Int> {
 
         StepWorker.registerProcessor(StepLogger())
         val http = OkHttpClient()
-        val sandbox = Files.createTempDirectory("idea-ui-controller-sandbox")
-        println("Sandbox: ${sandbox.absolutePathString()}")
 
+        println("[1/4] Creating sandbox ...")
+        val sandbox = Files.createTempDirectory("idea-ui-controller-sandbox")
+        println("      ${sandbox.absolutePathString()}")
+
+        println("[2/4] Downloading robot-server plugin (cached after first run) ...")
         val robotPlugin = IdeDownloader(http).downloadRobotPlugin(sandbox)
-        println("Robot plugin: $robotPlugin")
+        println("      $robotPlugin")
 
         val pluginArchives: MutableList<Path> = mutableListOf(robotPlugin)
         for (extra in extraPlugins) {
@@ -203,14 +207,15 @@ class RunIdeCommand : Callable<Int> {
             if (Files.isDirectory(extra)) {
                 val zipped = sandbox.resolve("${extra.fileName}.zip")
                 zipPluginDirectory(extra, zipped)
-                println("Packed plugin dir $extra -> $zipped")
+                println("      Packed plugin dir $extra -> $zipped")
                 pluginArchives.add(zipped)
             } else {
-                println("Extra plugin archive: $extra")
+                println("      Extra plugin archive: $extra")
                 pluginArchives.add(extra.toAbsolutePath())
             }
         }
 
+        println("[3/4] Launching IDE process ...")
         val process = IdeLauncher.launchIde(
             pathToIde = idePath.toAbsolutePath(),
             additionalProperties = mapOf("robot-server.port" to port),
@@ -218,19 +223,42 @@ class RunIdeCommand : Callable<Int> {
             requiredPluginsArchives = pluginArchives,
             ideSandboxDir = sandbox,
         )
-        println("IDE pid=${process.pid()}. Waiting up to ${timeoutSeconds}s for robot-server on :$port ...")
+        println("      pid=${process.pid()}")
 
+        println("[4/4] Waiting up to ${timeoutSeconds}s for robot-server on :$port ...")
         val remote = RemoteRobot("http://127.0.0.1:$port", http)
-        waitFor(Duration.ofSeconds(timeoutSeconds), Duration.ofMillis(200)) {
-            check(process.isAlive) { "IDE process (pid=${process.pid()}) exited unexpectedly while waiting for robot-server on :$port" }
+        val startMs = System.currentTimeMillis()
+        val deadlineMs = startMs + timeoutSeconds * 1_000
+        var lastLogMs = startMs
+        var tcpReportedOpen = false
+        while (true) {
+            check(process.isAlive) {
+                "IDE process (pid=${process.pid()}) exited unexpectedly while waiting for robot-server on :$port"
+            }
             val tcpOpen = try {
                 java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 200); true }
             } catch (_: Throwable) { false }
-            tcpOpen && runCatching { remote.callJs<Boolean>("true") }.getOrDefault(false)
+            if (tcpOpen && !tcpReportedOpen) {
+                val elapsed = (System.currentTimeMillis() - startMs) / 1_000
+                println("      [${elapsed}s] TCP :$port open — waiting for robot-server to accept requests ...")
+                tcpReportedOpen = true
+            }
+            if (tcpOpen && runCatching { remote.callJs<Boolean>("true") }.getOrDefault(false)) break
+            val nowMs = System.currentTimeMillis()
+            if (nowMs >= deadlineMs) error("Timed out after ${timeoutSeconds}s waiting for robot-server on :$port")
+            if (nowMs - lastLogMs >= 10_000) {
+                val elapsed = (nowMs - startMs) / 1_000
+                val status = if (tcpReportedOpen) "TCP open, robot-server not responding yet" else "TCP :$port not open yet"
+                println("      [${elapsed}s] $status ...")
+                lastLogMs = nowMs
+            }
+            Thread.sleep(200)
         }
 
+        val elapsed = (System.currentTimeMillis() - startMs) / 1_000
         State(process.pid(), port, sandbox).save()
-        println("Robot-server is UP. State written to $STATE_FILE.")
+        println("      [${elapsed}s] Robot-server is UP.")
+        println("State written to $STATE_FILE.")
         return 0
     }
 }
@@ -263,6 +291,44 @@ class StopIdeCommand : Callable<Int> {
     }
 }
 
+private val FOCUS_SUMMARY_JS = """
+    importClass(java.awt.Window);
+    importClass(java.awt.Frame);
+    importClass(java.awt.Dialog);
+    importClass(java.awt.KeyboardFocusManager);
+    function describe(w) {
+        if (w === null) return "<none>";
+        var title = "";
+        if (w instanceof Frame || w instanceof Dialog) {
+            var t = w.getTitle();
+            if (t !== null) title = String(t);
+        }
+        var cls = w.getClass().getSimpleName();
+        return (title.length > 0 ? "'" + title + "' " : "") + "(" + cls + ")";
+    }
+    var kfm = KeyboardFocusManager.getCurrentKeyboardFocusManager();
+    var current = kfm.getFocusedWindow();
+    if (current === null) current = kfm.getActiveWindow();
+    var others = [];
+    var all = Window.getWindows();
+    for (var i = 0; i < all.length; i++) {
+        var w = all[i];
+        if (w === current) continue;
+        if (!w.isShowing()) continue;
+        others.push(describe(w));
+    }
+    "Current window: " + describe(current) + "\n" +
+    "Other windows: [" + others.join(", ") + "]\n";
+""".trimIndent()
+
+private fun fetchFocusSummary(r: RemoteRobot): String =
+    runCatching { r.callJs<String>(FOCUS_SUMMARY_JS, true) }
+        .getOrElse { "Current window: <unknown>\nOther windows: []\n(focus probe failed: ${it.message?.take(160)})\n" }
+
+private fun fetchComponentTree(port: Int): String =
+    OkHttpClient().newCall(Request.Builder().url("http://127.0.0.1:$port/").build())
+        .execute().use { it.body?.string() ?: "" }
+
 @Command(
     name = "getState",
     description = [
@@ -275,51 +341,93 @@ class GetStateCommand : Callable<Int> {
 
     override fun call(): Int {
         val state = requireRunningState()
-        val r = RemoteRobot("http://127.0.0.1:${state.port}", OkHttpClient())
-
-        val summary = runCatching {
-            r.callJs<String>(
-                """
-                importClass(java.awt.Window);
-                importClass(java.awt.Frame);
-                importClass(java.awt.Dialog);
-                importClass(java.awt.KeyboardFocusManager);
-                function describe(w) {
-                    if (w === null) return "<none>";
-                    var title = "";
-                    if (w instanceof Frame || w instanceof Dialog) {
-                        var t = w.getTitle();
-                        if (t !== null) title = String(t);
-                    }
-                    var cls = w.getClass().getSimpleName();
-                    return (title.length > 0 ? "'" + title + "' " : "") + "(" + cls + ")";
-                }
-                var kfm = KeyboardFocusManager.getCurrentKeyboardFocusManager();
-                var current = kfm.getFocusedWindow();
-                if (current === null) current = kfm.getActiveWindow();
-                var others = [];
-                var all = Window.getWindows();
-                for (var i = 0; i < all.length; i++) {
-                    var w = all[i];
-                    if (w === current) continue;
-                    if (!w.isShowing()) continue;
-                    others.push(describe(w));
-                }
-                "Current window: " + describe(current) + "\n" +
-                "Other windows: [" + others.join(", ") + "]\n";
-                """.trimIndent(),
-                true,
-            )
-        }.getOrElse { "Current window: <unknown>\nOther windows: []\n(focus probe failed: ${it.message?.take(160)})\n" }
-
-        print(summary)
+        print(fetchFocusSummary(RemoteRobot("http://127.0.0.1:${state.port}", OkHttpClient())))
         if (noTree) return 0
-
         println("--- component tree ---")
-        val body = OkHttpClient().newCall(
-            Request.Builder().url("http://127.0.0.1:${state.port}/").build(),
-        ).execute().use { it.body?.string() ?: "" }
-        print(body)
+        print(fetchComponentTree(state.port))
+        return 0
+    }
+}
+
+@Command(
+    name = "getStateSummary",
+    description = [
+        "Print a focus summary followed by a compact list of interactive UI elements (buttons, fields, checkboxes, menus, trees, etc.).",
+        "Use this as the default post-action observation. Fall back to getState when you need the raw tree for unknown layouts.",
+    ],
+)
+class GetStateSummaryCommand : Callable<Int> {
+
+    companion object {
+        private val ALWAYS_SHOW = setOf(
+            "JButton", "JBOptionButton", "MainButton",
+            "ActionButton",
+            "ActionMenuItem",
+            "JCheckBox", "JBCheckBox",
+            "JRadioButton",
+            "JTextField", "JBTextField", "JTextArea", "JBTextArea",
+            "EditorTextField", "BorderlessTextField", "ExtendableTextField",
+            "JComboBox",
+            "JList", "JBList",
+            "JTree",
+            "MyDialog",
+            "HeavyWeightWindow",
+        )
+        private val SHOW_IF_TEXT = setOf(
+            "ActionMenu",
+            "ActionLink",
+            "JLabel", "JBLabel",
+            "SimpleColoredComponent",
+        )
+        private val CHECKBOX_CLASSES = setOf("JCheckBox", "JBCheckBox", "JRadioButton")
+        private val ATTR = Regex("""(\w[\w-]*)="([^"]*)"""")
+    }
+
+    override fun call(): Int {
+        val state = requireRunningState()
+        print(fetchFocusSummary(RemoteRobot("http://127.0.0.1:${state.port}", OkHttpClient())))
+
+        val body = fetchComponentTree(state.port)
+        println("--- interactive elements ---")
+        var count = 0
+        for (chunk in body.split(Regex("<div\\b")).drop(1)) {
+            val tag = chunk.substringBefore(">")
+            val attrs = ATTR.findAll(tag).associate { it.groupValues[1] to it.groupValues[2] }
+            val cls = attrs["class"] ?: continue
+            val inAlways = cls in ALWAYS_SHOW
+            val inIfText = cls in SHOW_IF_TEXT
+            if (!inAlways && !inIfText) continue
+
+            val text = attrs["text"]?.takeIf { it.isNotBlank() }
+            val accessibleName = attrs["accessiblename"]?.takeIf { it.isNotBlank() }
+            val visibleText = attrs["visible_text"]?.takeIf { it.isNotBlank() }
+            val label = accessibleName ?: text ?: visibleText ?: ""
+
+            if (inIfText && label.isBlank()) continue
+
+            val enabled = attrs["enabled"] != "false"
+            val checked = attrs["checked"]
+            val hasFocus = attrs["hasfocus"] == "true"
+
+            fun String.q() = replace("'", "\\'")
+            val xpath = when {
+                accessibleName != null -> "//div[@accessiblename='${accessibleName.q()}' and @class='$cls']"
+                text != null -> "//div[@text='${text.q()}' and @class='$cls']"
+                else -> "//div[@class='$cls']"
+            }
+
+            val flags = buildList {
+                if (!enabled) add("disabled")
+                if (cls in CHECKBOX_CLASSES) add(if (checked == "true") "checked" else "unchecked")
+                if (hasFocus) add("focused")
+            }.joinToString(", ")
+
+            val displayLabel = if (label.isNotBlank()) "\"${label.take(48)}\"" else "\"\""
+            val flagStr = if (flags.isNotBlank()) "  [$flags]" else ""
+            println("%-28s %-50s  %s%s".format("[$cls]", displayLabel, xpath, flagStr))
+            count++
+        }
+        if (count == 0) println("(no interactive elements found)")
         return 0
     }
 }

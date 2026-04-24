@@ -55,7 +55,8 @@ Each `runIde` call creates a **new** temp sandbox and installs only the plugins 
 - `probe` — one `callJs("true")` round-trip; quick health check.
 
 **Generic**
-- `getState` — print a **focus summary** (current window + list of other visible windows) followed by the full UI component tree (XML). Use the summary to answer "where am I?"; pipe the XML to `grep` to discover xpaths. Add `--no-tree` to get only the summary. Expected shape:
+- `getStateSummary` — **default observation command.** Prints the focus summary then a compact list of every interactive element (buttons, fields, checkboxes, menus, lists, trees, dialogs) with ready-to-use xpaths. Use this after every state-changing action. Pipe through `grep` to narrow further. Falls back to `getState` when you need the raw tree.
+- `getState` — print a **focus summary** (current window + list of other visible windows) followed by the full UI component tree (XML). Use as a fallback when `getStateSummary` isn't sufficient. Add `--no-tree` to get only the focus summary. Expected shape:
   ```
   Current window: 'New Project' (MyDialog)
   Other windows: ['Welcome to IntelliJ IDEA' (FlatWelcomeFrame)]
@@ -176,17 +177,17 @@ idea-ui-controller editorGetText              # verify result
 ## Tips for agent use
 
 - **Run `getState` between every UI action — but choose the right form.** The live UI is not deterministic across versions or between runs — dialogs shift, focus moves, indexing kicks in. After every `clickButton` / `welcome*` / `actionMenuItem` / `dialogClickButton` / any state-changing call, re-observe the UI before deciding the next step. Chaining actions blind is the fastest way to wedge. Pick the cheapest form that answers your question:
-  - `getState --no-tree` — **focus check only.** Returns current window + other visible windows. Use when you only need to answer "where am I?" or confirm focus after `focusWindow`. Do not use when you need to find or verify any UI element.
-  - `getState | grep -n "..."` — **targeted lookup.** Pipes the full tree through grep so only matching lines reach your context. Use when you know what you're looking for (an `accessiblename`, a button text, a class name). This is the default for most post-action checks.
-  - `getState` (full, unfiltered) — **open-ended discovery.** Use when grep isn't giving you enough context to orient yourself or when you're in truly unfamiliar UI territory. Fine to reach for occasionally — just not as the default after every action.
-  - **before/after diff** — **action-effect check.** Snapshot the tree before an action, perform the action, snapshot again, then diff. Only the changed lines reach your context — far cheaper than reading either full tree:
+  - **`getStateSummary` is the default post-action observation.** It prints the focus summary (current + other windows) followed by a compact flat list of every interactive element visible right now — buttons, text fields, checkboxes, menus, lists, trees, dialogs — each with its ready-to-use xpath. One call gives you everything you need to pick the next action, at a fraction of the context cost of the raw tree. Use it after every state-changing action as your standard "what do I have in front of me?" check. You can also pipe it through grep when you need to narrow further:
     ```sh
-    idea-ui-controller getState > /tmp/before.xml
-    idea-ui-controller clickButton --text "OK"
-    idea-ui-controller getState > /tmp/after.xml
-    diff /tmp/before.xml /tmp/after.xml
+    idea-ui-controller getStateSummary                      # default: full interactive summary
+    idea-ui-controller getStateSummary | grep "Trust\|Open"  # filter to specific elements
     ```
-    Use this whenever you want to confirm what an action actually changed (a dialog closed, a new panel appeared, a checkbox toggled) without having to parse the whole tree.
+  - `getState --no-tree` — **focus-only check.** Returns current window + other visible windows, nothing else. Use only when all you need to answer is "which window has focus?" (e.g. confirming `focusWindow` worked). Do not use when you need to find or act on any element.
+  - `getState` (full tree, raw XML) — **fallback for unknown layouts.** Use when `getStateSummary` isn't giving you enough context — e.g. you need to understand containment (is this button inside a toolbar or a dialog?), find a component class that isn't in the interactive-element allowlist, or diagnose why an xpath isn't matching. Pipe through grep rather than reading the whole output raw:
+    ```sh
+    idea-ui-controller getState | grep -n "accessiblename\|class=\"JButton\"" | head -20
+    idea-ui-controller getState > /tmp/ui.xml && grep -n "BorderlessTextField" /tmp/ui.xml
+    ```
 - **`Current window: <none>` means focus loss — act on it immediately.** If `getState` reports `Current window: <none>`, the IDE window is unfocused (a native dialog, OS event, or prior action stole it). Any keyboard or click action you send next will silently go nowhere. **Stop, call `focusWindow` (optionally `--title <substring>` to target a specific window), then call `getState` again to confirm focus is restored before continuing.** Do not skip this step and do not assume the next action will work anyway.
 - **Multiple matches.** `clickButton --text` can match several components (e.g. a `JButton` and its child `JBLabel` both carry the label text). The CLI clicks the first match and prints a warning. When the action doesn't fire, add `--xpath` with a `@class` predicate: `"//div[@accessiblename='New Project' and @class='JButton']"`.
 - **Quoting paths with spaces.** Always quote the `.app` path — it contains a space (`IntelliJ IDEA.app`).

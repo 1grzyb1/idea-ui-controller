@@ -67,9 +67,15 @@ internal to it.
 
 ### Observation
 
-- **`getState`** — print a focus summary (current window + other visible
-  windows) followed by the full UI component tree (XML). The summary
-  answers "where am I?"; the tree answers "what is there?". When
+- **`getStateSummary`** — **default observation command.** Prints the
+  focus summary then a compact flat list of every interactive element
+  visible right now (buttons, text fields, checkboxes, menus, lists,
+  trees, dialogs) with a ready-to-use xpath for each. Designed for use
+  after every state-changing action as a cheap "what's in front of me?"
+  check.
+- **`getState [--no-tree]`** — fallback for unknown layouts. Prints the
+  focus summary followed by the full UI component tree (XML); `--no-tree`
+  drops the tree and leaves only the focus summary. When
   `Current window: <none>` appears, a native dialog or OS event has stolen
   focus — subsequent clicks and keystrokes will silently go nowhere, and
   the caller should call `focusWindow` before continuing.
