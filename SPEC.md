@@ -63,7 +63,9 @@ internal to it.
   probe interleaves a TCP-open check with a `callJs("true")` round-trip,
   polled every 200 ms, so the CLI returns as soon as the server is ready.
 - **`stopIde`** — kill registered IDE + delete sandbox.
-- **`probe [--port N]`** — one `callJs("true")` health check.
+- **`probe [--port N]`** — one `callJs("true")` health check. Intended as
+  the canonical pre-flight: `probe` tells callers whether an IDE is
+  already running without the noise of `--help` or `java -version`.
 
 ### Observation
 
@@ -163,6 +165,12 @@ ActionLinkFixture, Gutter).
   Welcome → New Project → fill → Create → wait for IdeFrame.
 - **`createScratchFile --name X.ext [--language LANG] [--content "..."]`** —
   create + open a scratch file via `ScratchRootType`.
+
+There is intentionally **no** `projectOpen` high-level flow; opening an
+existing project composes from the primitives above (`clickButton` on
+"Open", `runJs --edt` to set the path — *not* `typeText`, which triggers
+autocomplete timeouts — `sendKey --key ENTER`, plus the usual Trust Project
++ onboarding-dismiss steps).
 
 ## Build
 

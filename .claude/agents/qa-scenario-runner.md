@@ -41,10 +41,11 @@ You use the `idea-ui-controller` CLI via Bash. The canonical skill reference is 
 
 Before the first UI command, confirm prerequisites:
 ```sh
-java -version
 command -v idea-ui-controller
 idea-ui-controller probe || idea-ui-controller runIde "<IDE .app path>"
 ```
+Do **not** run `java -version` or `idea-ui-controller --help` — they add steps without value. `probe` is the only health check you need: `OK: true` means the IDE is reachable; `FAIL` means you need `runIde`.
+
 If `probe` fails and you need to launch the IDE, only `runIde` if the orchestrator provided the path AND no other scenario already launched it (check prior logs).
 
 ## The test log — the only artifact that matters

@@ -11,11 +11,12 @@ The underlying library is JetBrains' **[intellij-ui-test-robot](https://github.c
 
 ## Prerequisites — verify before any run
 
-1. **`idea-ui-controller` on PATH** — the binary produced by `./gradlew executable` embeds the correct Java 25 path at build time, so no `export JAVA_HOME` is ever needed. Verify it resolves:
+1. **`idea-ui-controller` on PATH** — the binary produced by `./gradlew executable` embeds the correct Java 25 path at build time, so no `export JAVA_HOME` is ever needed. Verify it resolves and the IDE is reachable:
    ```sh
-   command -v idea-ui-controller   # must resolve
-   idea-ui-controller --help       # must print the command list
+   command -v idea-ui-controller          # must resolve
+   idea-ui-controller probe               # OK: true → IDE already running; FAIL → need runIde
    ```
+   Do **not** run `--help` or `java -version` as a pre-flight check — they add noise and `probe` already tells you everything you need to know about readiness.
 
 2. **A built IDE to target.** The IDE path you pass to `runIde` must be a real IntelliJ-family `.app` bundle on macOS (directory ending in `.app`) or the equivalent unpacked distribution directory on Linux/Windows. Example of the correct shape:
    ```
@@ -106,6 +107,19 @@ Each `runIde` call creates a **new** temp sandbox and installs only the plugins 
 
 **High-level flows**
 - `projectCreateFromDialog --name X [--location PATH]` — runs the full Welcome → New Project → fill Name/Location → Create → wait for IdeFrame sequence. After it returns, the project may still be indexing (call `ideWaitSmart` if you need smart mode) and onboarding panels (e.g. "Meet the Islands Theme") may appear — dismiss with `actionLinkClickByText --text "Skip"`.
+
+**Opening an existing project** (no dedicated command yet — do these steps manually):
+```sh
+idea-ui-controller clickButton --xpath "//div[@accessiblename='Open' and @class='JButton']"
+# use runJs --edt to set the path — do NOT use typeText (autocomplete timeouts)
+idea-ui-controller runJs --edt --script "java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner().setText('/your/project/path');"
+idea-ui-controller sendKey --key ENTER
+# Trust Project dialog always appears on first open of a project in the sandbox
+idea-ui-controller clickButton --xpath "//div[@accessiblename='Trust Project' and @class='JButton']"
+# "Meet the Islands Theme" onboarding panel reliably appears after every project open — always dismiss it
+idea-ui-controller actionLinkClickByText --text "Skip"
+idea-ui-controller ideWaitSmart
+```
 - `createScratchFile --name X.ext [--language LANG] [--content "..."]` — creates a scratch file via `ScratchRootType` and opens it. Requires a project to be open (`ideVerify`). `--language` is an IntelliJ Language ID (e.g. `kotlin`, `JAVA`, `Python`); defaults to plain text. Note: scratches don't live under the project directory — they're stored under the IDE's config dir (in our case the CLI's sandbox: `<sandbox>/config*/scratches/`).
 
 ## Example flow — open the New Project dialog
