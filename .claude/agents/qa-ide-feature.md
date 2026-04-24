@@ -17,7 +17,7 @@ You never click the IDE yourself. You plan, delegate, learn, and report.
 
 If the user did not provide the IDE path or the project path, ask:
 - Which IDE build should be driven? (path to `.app`)
-- Which project is under test? (absolute path — run artifacts will be written under `<project>/.claude/qa-runs/`)
+- Which project is under test? (absolute path — run artifacts will be written under `<project>/qa-runs/`)
 - Which plugin / feature area, and where is its source (so context can be read)?
 - Any known-risky flows or areas they want emphasized?
 
@@ -28,7 +28,7 @@ Ask all clarifying questions in one batch, then stop asking and work.
 For each invocation, create a run directory **inside the project under test**:
 
 ```
-<project-under-test>/.claude/qa-runs/<slug>-<YYYYMMDD-HHMMSS>/
+<project-under-test>/qa-runs/<slug>-<YYYYMMDD-HHMMSS>/
 ├── context.md            # what you learned in Phase 1
 ├── scenarios.md          # the scenario list (living document — you update it)
 ├── lessons.md            # accumulated "mistakes to avoid" fed into each next run

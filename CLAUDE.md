@@ -73,7 +73,7 @@ Two subagents that together implement automated IDE QA. They are invoked via the
 
 **`qa-ide-feature`** (model: opus) — orchestrator:
 - Takes a feature description, gathers context from source + live IDE, designs 5–10 test scenarios, dispatches them one by one to `qa-scenario-runner`, accumulates lessons between runs, and writes a final `report.md`.
-- Stores run artifacts under `.claude/qa-runs/<slug>-<timestamp>/`.
+- Stores run artifacts under `<project>/qa-runs/<slug>-<timestamp>/`.
 - Never drives the IDE itself — delegates all CLI calls to the runner.
 
 **`qa-scenario-runner`** (model: sonnet) — executor:
