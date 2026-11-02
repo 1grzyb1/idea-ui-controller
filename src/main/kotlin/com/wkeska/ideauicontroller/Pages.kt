@@ -12,7 +12,8 @@ import java.io.Serializable
 import java.time.Duration
 import java.util.concurrent.Callable
 
-private fun xp(expr: String) = byXpath(expr)
+// xpaths copied from getState carry HTML entities (`&larr; Back`) where the component has the plain character
+internal fun xp(expr: String) = byXpath(decodeHtmlEntities(expr))
 
 private fun <T : ComponentFixture> RemoteRobot.findAlive(type: Class<T>, locator: Locator, timeout: Duration): T {
     val pid = State.load()?.pid
@@ -62,7 +63,13 @@ private fun clickFixture(f: ComponentFixture) = f.click()
 
 // ---------- Generic JS ----------
 
-@Command(name = "runJs", description = ["Run an arbitrary robot runJs script (no return value)."])
+@Command(
+    name = "runJs",
+    description = [
+        "Run an arbitrary robot runJs script (no return value).",
+        "Prelude helpers: loadPluginClass(pluginId, fqn), pluginClass(pluginId, fqn), normText(s), focusOwner(), onEdt(fn).",
+    ],
+)
 class RunJsCommand : Callable<Int> {
     @Option(names = ["--script", "-s"], required = true, description = ["The JS script body."])
     lateinit var script: String
@@ -71,12 +78,18 @@ class RunJsCommand : Callable<Int> {
     var edt: Boolean = false
 
     override fun call(): Int {
-        connect().runJs(script, edt)
+        connect().runJs(withPrelude(script), edt)
         return 0
     }
 }
 
-@Command(name = "callJs", description = ["Call an arbitrary robot callJs script and print the result."])
+@Command(
+    name = "callJs",
+    description = [
+        "Call an arbitrary robot callJs script and print the result.",
+        "Prelude helpers: loadPluginClass(pluginId, fqn), pluginClass(pluginId, fqn), normText(s), focusOwner(), onEdt(fn).",
+    ],
+)
 class CallJsCommand : Callable<Int> {
     @Option(names = ["--script", "-s"], required = true, description = ["The JS script body."])
     lateinit var script: String
@@ -85,7 +98,7 @@ class CallJsCommand : Callable<Int> {
     var edt: Boolean = false
 
     override fun call(): Int {
-        val r = connect().callJs<Serializable>(script, edt)
+        val r = connect().callJs<Serializable>(withPrelude(script), edt)
         println(r)
         return 0
     }
@@ -369,35 +382,40 @@ class IdeProjectNameCommand : Callable<Int> {
     }
 }
 
-@Command(name = "ideIsSmart", description = ["Print true if the IDE is in smart mode (not dumb)."])
+// Every open project out of dumb mode. Read off the EDT and without a frame fixture: a modal dialog (e.g. a "Meet the
+// new theme" popup) blocks EDT calls, and a frame found while the project is still opening goes stale.
+private const val ALL_PROJECTS_SMART_JS = """
+    var projects = com.intellij.openapi.project.ProjectManager.getInstance().getOpenProjects();
+    var smart = projects.length > 0;
+    for (var i = 0; i < projects.length; i++) {
+        if (com.intellij.openapi.project.DumbService.isDumb(projects[i])) smart = false;
+    }
+    smart;
+"""
+
+@Command(name = "ideIsSmart", description = ["Print true if a project is open and no open project is in dumb mode."])
 class IdeIsSmartCommand : Callable<Int> {
     override fun call(): Int {
-        val r = connect()
-        val frame = r.ideFrame()
-        val smart = r.callJs<Boolean>(
-            frame,
-            "component.project == null ? false : !com.intellij.openapi.project.DumbService.isDumb(component.project);",
-            true,
-        )
-        println(smart)
+        println(connect().callJs<Boolean>(ALL_PROJECTS_SMART_JS, false))
         return 0
     }
 }
 
-@Command(name = "ideWaitSmart", description = ["Block until the IDE is in smart mode."])
+@Command(name = "ideWaitSmart", description = ["Block until a project is open and no open project is in dumb mode."])
 class IdeWaitSmartCommand : Callable<Int> {
     @Option(names = ["--timeout-seconds"]) var timeoutSeconds: Long = 300
     override fun call(): Int {
         val r = connect()
-        val frame = r.ideFrame()
-        waitFor(Duration.ofSeconds(timeoutSeconds), Duration.ofSeconds(5)) {
-            runCatching {
-                r.callJs<Boolean>(
-                    frame,
-                    "component.project == null ? false : !com.intellij.openapi.project.DumbService.isDumb(component.project);",
-                    true,
-                )
-            }.getOrDefault(false)
+        var lastError: Throwable? = null
+        try {
+            waitFor(Duration.ofSeconds(timeoutSeconds), Duration.ofSeconds(2)) {
+                runCatching { r.callJs<Boolean>(ALL_PROJECTS_SMART_JS, false) }
+                    .onFailure { lastError = it }
+                    .getOrDefault(false)
+            }
+        } catch (e: Exception) {
+            lastError?.let { e.addSuppressed(it) }
+            throw e
         }
         println("Smart mode reached.")
         return 0
@@ -526,7 +544,7 @@ class GutterVerifyCommand : Callable<Int> {
 
 // ---------- Widgets (generic) ----------
 
-private fun jsEscape(s: String) = s
+internal fun jsEscape(s: String) = s
     .replace("\\", "\\\\")
     .replace("'", "\\'")
     .replace("\n", "\\n")
@@ -534,7 +552,7 @@ private fun jsEscape(s: String) = s
 
 // Interprets \n, \t, \r, \\ in a user-supplied string so shell-quoted arguments can carry newlines and tabs.
 // Unknown escape sequences (e.g. \x) pass through verbatim.
-private fun interpretEscapes(s: String): String = buildString {
+internal fun interpretEscapes(s: String): String = buildString {
     var i = 0
     while (i < s.length) {
         val c = s[i]
@@ -571,7 +589,7 @@ class ListSelectCommand : Callable<Int> {
                 var v = model.getElementAt(i);
                 if (v != null && String(v.toString()) === '$esc') { idx = i; break; }
             }
-            if (idx < 0) throw new java.lang.RuntimeException("no list item matching '$esc'");
+            if (idx < 0) throw String("no list item matching '$esc'");
             component.setSelectedIndex(idx);
             component.ensureIndexIsVisible(idx);
             """.trimIndent()
@@ -609,7 +627,7 @@ class TreeSelectCommand : Callable<Int> {
                 var last = tp.getLastPathComponent();
                 if (last !== null && String(last.toString()) === '$esc') { idx = i; break; }
             }
-            if (idx < 0) throw new java.lang.RuntimeException("no tree row matching '$esc'");
+            if (idx < 0) throw String("no tree row matching '$esc'");
             component.setSelectionRow(idx);
             component.scrollRowToVisible(idx);
             """.trimIndent()
@@ -652,10 +670,10 @@ internal fun RemoteRobot.setFieldByLabel(label: String, text: String) {
             found = findLabel(windows[i]);
             if (found !== null) break;
         }
-        if (found === null) throw new java.lang.RuntimeException("no JLabel with text='$escLabel'");
+        if (found === null) throw String("no JLabel with text='$escLabel'");
         var target = found.getLabelFor();
-        if (target === null) throw new java.lang.RuntimeException("JLabel '$escLabel' has no labelFor");
-        if (!(target instanceof JTextComponent)) throw new java.lang.RuntimeException("labelFor is not a text component");
+        if (target === null) throw String("JLabel '$escLabel' has no labelFor");
+        if (!(target instanceof JTextComponent)) throw String("labelFor is not a text component");
         target.setText('$escText');
         """.trimIndent(),
         true,
@@ -761,34 +779,97 @@ class SendKeyCommand : Callable<Int> {
     description = [
         "Type a literal string into the focused window via the AWT robot (one char at a time).",
         "Interprets \\n, \\t, \\r, and \\\\ escapes. Newline maps to VK_ENTER, tab to VK_TAB; other chars go through robot.type().",
+        "Long text is sent in chunks, each a separate request, so no request runs into the HTTP read timeout and",
+        "the command returns only after the last key is typed. --set replaces the focused text field's text instead.",
     ],
 )
 class TypeTextCommand : Callable<Int> {
     @Option(names = ["--text", "-t"], required = true, description = ["Literal text (supports \\n, \\t, \\r, \\\\ escapes)."])
     lateinit var text: String
-    @Option(names = ["--delay-ms"], description = ["Sleep between keystrokes in ms (default 50)."])
-    var delayMs: Long = 50
+    @Option(names = ["--delay-ms"], description = ["Sleep between keystrokes in ms (default 20)."])
+    var delayMs: Long = 20
+    @Option(
+        names = ["--set"],
+        description = ["Don't type: setText on the focused JTextComponent on the EDT (tokens, paths, anything long). No key events, no autocomplete."],
+    )
+    var set: Boolean = false
 
     override fun call(): Int {
         val resolved = interpretEscapes(text)
-        val esc = jsEscape(resolved)
-        connect().runJs(
-            """
-            importClass(java.awt.event.KeyEvent);
-            var s = '$esc';
-            for (var i = 0; i < s.length; i++) {
-                var cc = s.charAt(i);
-                if (cc === '\n') robot.pressAndReleaseKey(KeyEvent.VK_ENTER);
-                else if (cc === '\t') robot.pressAndReleaseKey(KeyEvent.VK_TAB);
-                else if (cc === '\r') robot.pressAndReleaseKey(KeyEvent.VK_ENTER);
-                else robot.type(cc);
-                if (i + 1 < s.length) java.lang.Thread.sleep($delayMs);
-            }
-            """.trimIndent(),
-            false,
-        )
+        val r = connect()
+        if (set) {
+            val result = r.callJs<String>(
+                withPrelude(
+                    """
+                    var c = focusOwner();
+                    if (!(c instanceof javax.swing.text.JTextComponent)) 'NOT_TEXT: ' + (c === null ? '<none>' : c.getClass().getName());
+                    else onEdt(function() { c.setText('${jsEscape(resolved)}'); return 'OK'; });
+                    """.trimIndent(),
+                ),
+                false,
+            )
+            check(result == "OK") { "--set needs a focused text field. Focus owner: ${result.removePrefix("NOT_TEXT: ")}" }
+            return 0
+        }
+        // The robot-server handles one request at a time: a request still typing after the client gave up keeps
+        // typing and every later command waits behind it. Keep each request to a few seconds.
+        val chunkSize = (3_000 / (delayMs + 10)).toInt().coerceIn(1, 200)
+        for (chunk in resolved.chunked(chunkSize)) {
+            r.runJs(
+                """
+                importClass(java.awt.event.KeyEvent);
+                importClass(java.awt.event.InputEvent);
+                // A plain java.awt.Robot: the assertj robot waits for an idle EDT after every press and release,
+                // ~120 ms per shifted char. One wait at the end of the chunk keeps the order of later commands.
+                var awt = global.get('iuc.awtRobot');
+                if (awt === null) { awt = new java.awt.Robot(); global.put('iuc.awtRobot', awt); }
+                var MODIFIERS = [
+                    [InputEvent.SHIFT_DOWN_MASK | InputEvent.SHIFT_MASK, KeyEvent.VK_SHIFT],
+                    [InputEvent.CTRL_DOWN_MASK | InputEvent.CTRL_MASK, KeyEvent.VK_CONTROL],
+                    [InputEvent.ALT_DOWN_MASK | InputEvent.ALT_MASK, KeyEvent.VK_ALT],
+                    [InputEvent.ALT_GRAPH_DOWN_MASK | InputEvent.ALT_GRAPH_MASK, KeyEvent.VK_ALT_GRAPH],
+                    [InputEvent.META_DOWN_MASK | InputEvent.META_MASK, KeyEvent.VK_META],
+                ];
+                function press(code, modifiers) {
+                    var held = [];
+                    for (var m = 0; m < MODIFIERS.length; m++) {
+                        if ((modifiers & MODIFIERS[m][0]) !== 0) { awt.keyPress(MODIFIERS[m][1]); held.push(MODIFIERS[m][1]); }
+                    }
+                    awt.keyPress(code);
+                    awt.keyRelease(code);
+                    for (var h = held.length - 1; h >= 0; h--) awt.keyRelease(held[h]);
+                }
+                var s = '${jsEscape(chunk)}';
+                for (var i = 0; i < s.length; i++) {
+                    var cc = s.charAt(i);
+                    if (cc === '\n' || cc === '\r') press(KeyEvent.VK_ENTER, 0);
+                    else if (cc === '\t') press(KeyEvent.VK_TAB, 0);
+                    else {
+                        var ks = org.assertj.swing.keystroke.KeyStrokeMap.keyStrokeFor(cc);
+                        if (ks === null) robot.type(cc);
+                        else press(ks.getKeyCode(), ks.getModifiers());
+                    }
+                    awt.delay($delayMs);
+                }
+                // Let the X server deliver the events, then let the EDT process them
+                java.lang.Thread.sleep(50);
+                java.awt.EventQueue.invokeAndWait(new java.lang.Runnable({ run: function() {} }));
+                java.awt.EventQueue.invokeAndWait(new java.lang.Runnable({ run: function() {} }));
+                """.trimIndent(),
+                false,
+            )
+        }
         return 0
     }
+}
+
+// Modifier names people reach for that aren't VK_* constant names: there is no VK_CTRL, VK_CMD or VK_OPTION
+private val MODIFIER_ALIASES = mapOf("CTRL" to "CONTROL", "CMD" to "META", "COMMAND" to "META", "OPTION" to "ALT")
+
+private fun resolveVk(name: String): Int = try {
+    java.awt.event.KeyEvent::class.java.getField("VK_${name.uppercase()}").getInt(null)
+} catch (_: NoSuchFieldException) {
+    error("Unknown key '$name'. Use a VK_* constant name without the VK_ prefix, e.g. S, ENTER, F5.")
 }
 
 @Command(
@@ -802,17 +883,12 @@ class TypeTextCommand : Callable<Int> {
 class SendKeyComboCommand : Callable<Int> {
     @Option(names = ["--key"], required = true, description = ["VK_* constant name without the VK_ prefix (e.g. S, Z, ENTER)."])
     lateinit var key: String
-    @Option(names = ["--modifier"], description = ["Modifier key(s): META, CTRL, SHIFT, ALT. May be repeated."])
+    @Option(names = ["--modifier"], description = ["Modifier key(s): META (or CMD), CONTROL (or CTRL), SHIFT, ALT (or OPTION). May be repeated."])
     var modifiers: List<String> = emptyList()
 
     override fun call(): Int {
-        fun resolveVk(name: String): Int = try {
-            java.awt.event.KeyEvent::class.java.getField("VK_${name.uppercase()}").getInt(null)
-        } catch (_: NoSuchFieldException) {
-            error("Unknown key '$name'. Use a VK_* constant name without the VK_ prefix, e.g. S, ENTER, F5.")
-        }
         val mainVk = resolveVk(key)
-        val modVks = modifiers.map { resolveVk(it) }
+        val modVks = modifiers.map { resolveVk(MODIFIER_ALIASES[it.uppercase()] ?: it) }
         val press = modVks.joinToString("\n") { "robot.pressKey($it);" }
         val release = modVks.reversed().joinToString("\n") { "robot.releaseKey($it);" }
         connect().runJs(
@@ -829,28 +905,16 @@ class SendKeyComboCommand : Callable<Int> {
 
 // ---------- High-level flows ----------
 
-@Command(name = "actionLinkClickByText", description = ["Click an ActionLink by its visible text (e.g. onboarding 'Skip')."])
+@Command(
+    name = "actionLinkClickByText",
+    description = ["Click a link by its visible text (e.g. onboarding 'Skip'). Same as linkClick: also HTML links, entities decoded."],
+)
 class ActionLinkClickByTextCommand : Callable<Int> {
     @Option(names = ["--text"], required = true) lateinit var text: String
     @Option(names = ["--timeout-seconds"]) var timeoutSeconds: Long = 10
 
     override fun call(): Int {
-        val r = connect()
-        val f = r.find(
-            ComponentFixture::class.java,
-            xp("//div[@class='ActionLink' and (@text='$text' or @visible_text='$text' or @accessiblename='$text')]"),
-            Duration.ofSeconds(timeoutSeconds),
-        )
-        r.runJs(
-            f,
-            """
-            importClass(java.awt.Point);
-            importClass(org.assertj.swing.core.MouseButton);
-            var offset = component.getHeight() / 2;
-            robot.click(component, new Point(offset, offset), MouseButton.LEFT_BUTTON, 1);
-            """.trimIndent(),
-            false,
-        )
+        println(connect().clickLinkByText(text, timeoutSeconds))
         return 0
     }
 }
@@ -920,7 +984,7 @@ class CreateScratchFileCommand : Callable<Int> {
             importClass(com.intellij.openapi.application.ApplicationManager);
             importClass(com.intellij.openapi.application.WriteAction);
             var project = component.getProject();
-            if (project === null) throw new java.lang.RuntimeException("no active project; open one first");
+            if (project === null) throw String("no active project; open one first");
             ApplicationManager.getApplication().invokeAndWait(function() {
                 WriteAction.run(function() {
                     var lang = Language.findLanguageByID('$escLang');

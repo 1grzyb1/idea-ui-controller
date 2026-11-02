@@ -57,11 +57,39 @@ Each `runIde` call creates a **new** temp sandbox and installs only the plugins 
 - Pass an unpacked plugin directory (the one produced under `<your-plugin-project>/build/idea-sandbox/.../plugins_runIdeForUiTests/<PluginName>`) or a built `.zip`. Directory form is auto-zipped for you.
 - If the daemon is already alive (`probe` returns `OK: true`), prefer reusing it over `stopIde` + `runIde` — you skip the 10+ seconds of cold-start and avoid the plugin-install step entirely.
 
+## Docker mode (`runIde --docker`)
+
+Without `--docker` the AWT robot sends real OS key and mouse events: the IDE window has to be in front and the user can't
+use the machine meanwhile. With `--docker` everything happens on Xvfb inside a container; every other command works
+unchanged over `127.0.0.1:<port>`.
+
+- Needs Docker Desktop running. The CLI finds `docker` on `PATH` or in `~/.docker/bin`.
+- Pass the macOS `.app` as usual: the CLI reads its product code and build number and uses the Linux build of the same
+  version (aarch64 or x86_64, whatever Docker runs), downloaded once (~1.5 GB) to `~/.idea-ui-controller/downloads` and
+  unpacked to `~/.idea-ui-controller/linux-ides`. A Linux IDE directory works too, and so does a macOS IDE unpacked by
+  the IntelliJ Platform Gradle plugin (a `Contents` directory without the `.app` around it, e.g.
+  `~/.gradle/caches/*/transforms/*/transformed/idea-2026.2.3-aarch64`).
+- Instead of a path you can pass a build to download: `runIde --docker IU-263.7307.44`, or `IU-eap` for the newest EAP
+  (`https://data.services.jetbrains.com/products/releases?code=IIU&type=eap&latest=true`). An EAP build expires ~30 days
+  after release: it shows "EAP Build Expired" and exits, and `runIde` then says the logs mention an expired build. Use
+  `IU-eap`. A downloaded Linux IDE dir (`~/.idea-ui-controller/linux-ides/IU-<build>-aarch64`) can be passed directly.
+- A fresh EAP sandbox opens a modal "Log in to IntelliJ IDEA" dialog first. Log in with `jbaLogin` (see "EAP login").
+- The runtime image `idea-ui-controller-xvfb` is built from `src/main/resources/docker/` on the first run (~1 min),
+  cached after.
+- Paths are the same inside and outside the container: the sandbox (`~/.idea-ui-controller/sandboxes/...`), the IDE and
+  each `--mount DIR` are mounted 1:1. **A project the IDE should open must be passed as `--mount`** (e.g.
+  `--mount /tmp/vimtest`), otherwise it doesn't exist in the container. Files edited in the IDE are the host files.
+- It's Linux: the default keymap is the Linux one (Ctrl, not Cmd; e.g. Ctrl+F is Find), the window title says `(ROOT)`.
+  Bugs specific to macOS (Cmd shortcuts, native macOS focus) still need the host mode.
+- `screenshot` shows the 1920x1080 virtual screen. `idea.log` is in `<sandbox>/log*/idea.log` as usual; the IDE's raw
+  output (`<sandbox>/ide-output.log`) is the container output.
+
 ## Command catalog
 
 **Daemon lifecycle**
-- `runIde <path-to-.app>` — launch IDE, wait for robot-server, register state, exit.
-- `stopIde` — kill registered IDE + clean sandbox.
+- `runIde <path-to-.app>` — launch IDE, wait for robot-server, register state, exit. The IDE's own stdout/stderr go to `<sandbox>/ide-output.log` (printed by `runIde`), not to the CLI's output, so `runIde` returns even when its output is piped or captured. The IDE's `idea.log` is in `<sandbox>/log*/idea.log`.
+- `runIde --docker [--mount DIR]... <path-to-.app | linux-ide-dir | IU-<build> | IU-eap>` — **preferred on macOS.** Runs the Linux build of the same IDE in a Docker container (`idea-ui-controller`) on a virtual display (Xvfb), so typing and clicking never touch the host keyboard, mouse or focus. See "Docker mode" below.
+- `stopIde` — kill registered IDE + clean sandbox (in Docker mode also removes the container).
 - `probe` — one `callJs("true")` round-trip; quick health check.
 
 **Generic**
@@ -83,7 +111,16 @@ Each `runIde` call creates a **new** temp sandbox and installs only the plugins 
 - `clickButton --xpath=<xp>` (preferred) or `--text=<visible text>` — find and click.
 - `focusWindow [--title <substring>]` — bring a window to the front and give it focus. Matches the first visible window whose title contains `<substring>` (case-insensitive). Omit `--title` to focus the first visible window. Prints `Focused: '<title>' (ClassName)` on success; exits 1 if no match. Useful when `getState` shows `Current window: <none>` because a native dialog stole focus.
 - `runJs --script "..." [--edt]` — arbitrary robot runJs (no return).
-- `callJs --script "..." [--edt]` — arbitrary robot callJs (prints Serializable result).
+- `callJs --script "..." [--edt]` — arbitrary robot callJs (prints Serializable result). See "Scripts" below.
+- `linkClick --text "..." [--href] [--timeout-seconds N]` — click a hyperlink by its text: an `<a>` inside an HTML
+  `JEditorPane`/label (e.g. "copy the link"), an `ActionLink`, `LinkLabel` or `HyperlinkLabel`. Tags stripped, HTML
+  entities decoded (`&larr; Back` = `← Back`), whitespace collapsed; exact match, else the only link containing the
+  text. `--href` prints the link and its URL without clicking. On no match it lists the links on screen.
+- `clipboard [--set TEXT]` — print the IDE clipboard (`CopyPasteManager`), or set it.
+- `focusedComponent` — the focus owner: class, window, text, empty text, accessible name and **all client properties**
+  (validation errors show up as `JComponent.outline = error` + `Error.text = ...`).
+- `traceActions --start | --dump | --stop` — record executed actions (id, place, key stroke, result) and shortcuts with
+  their candidate actions. `--dump` prints and clears.
 
 **Welcome frame**
 - `welcomeVerify`
@@ -99,12 +136,14 @@ Each `runIde` call creates a **new** temp sandbox and installs only the plugins 
 
 **Keyboard (focused window)**
 - `sendKey --key <VK_NAME> [--count N] [--delay-ms M]` — dispatch a named key via the AWT robot. `--key` takes a `java.awt.event.KeyEvent.VK_*` constant name **without the `VK_` prefix** (case-insensitive): `ESCAPE`, `ENTER`, `TAB`, `BACK_SPACE`, `LEFT`, `F1`, etc. `--count` repeats with `--delay-ms` between presses. Use for named keys and for Vim commands like `Esc`. **No modifier support** — for combos use `sendKeyCombo`.
-- `sendKeyCombo --key <VK_NAME> [--modifier MOD]...` — dispatch a modifier+key combination. `--modifier` may be repeated: `META`, `CTRL`, `SHIFT`, `ALT`. Examples: `--key S --modifier META` (Cmd+S), `--key Z --modifier META --modifier SHIFT` (Cmd+Shift+Z). Modifiers are pressed in order, main key fires, modifiers release in reverse order.
-- `typeText --text "..." [--delay-ms M]` — type a literal string one char at a time. Supports `\n`, `\t`, `\r`, `\\` escapes; `\n` and `\r` map to VK_ENTER, `\t` to VK_TAB. Use for Vim commands composed of printable chars (`dd`, `yyp`, `gg`), insert-mode content entry, etc. **Footgun — do not use in autocomplete/file-chooser fields:** see Known footguns below.
+- `sendKeyCombo --key <VK_NAME> [--modifier MOD]...` — dispatch a modifier+key combination. `--modifier` may be repeated: `META` (alias `CMD`), `CONTROL` (alias `CTRL`), `SHIFT`, `ALT` (alias `OPTION`). Examples: `--key S --modifier META` (Cmd+S), `--key Z --modifier META --modifier SHIFT` (Cmd+Shift+Z). Modifiers are pressed in order, main key fires, modifiers release in reverse order.
+- `typeText --text "..." [--delay-ms M] [--set]` — type a literal string one char at a time (~25 ms/char, sent in
+  ~3 s chunks, returns only after the last key arrived, so the next command can't race it). `--set` does `setText` on
+  the focused `JTextComponent` on the EDT instead — use it for tokens, paths and anything long. Supports `\n`, `\t`, `\r`, `\\` escapes; `\n` and `\r` map to VK_ENTER, `\t` to VK_TAB. Use for Vim commands composed of printable chars (`dd`, `yyp`, `gg`), insert-mode content entry, etc. **Footgun — do not use in autocomplete/file-chooser fields:** see Known footguns below.
 - All three target the **focused** window — ensure the right editor/dialog has focus first (`editorOpen` / `clickButton` as needed).
 
 **Main IDE frame**
-- `ideVerify` · `ideProjectName` · `ideIsSmart` · `ideWaitSmart`
+- `ideVerify` · `ideProjectName` · `ideIsSmart` · `ideWaitSmart` — the smart-mode checks look at all open projects off the EDT, so they also work while a modal dialog is open.
 
 **Dialogs / menus / misc**
 - `dialogVerify --title "..."` · `dialogTitle [--title ...]`
@@ -119,16 +158,18 @@ Each `runIde` call creates a **new** temp sandbox and installs only the plugins 
 - `treeSelect --xpath "<locator for the JTree>" (--index N | --text "...")` — select a row in a JTree by zero-based index or by its last path component's `toString()`. Use for the Project tool window tree and any other `JTree`-backed widget. After selecting a node, trigger actions on it via keyboard shortcut (e.g. `sendKeyCombo --key INSERT --modifier ALT` for Alt+Insert / New).
 - `textFieldSet --label "..." --text "..."` — set a JTextComponent whose `labelFor` is the given JLabel.
 - `checkboxSet --text "..." --checked true --checked false` — click a JCheckBox only if its current state differs. `--checked` requires an explicit value: `true` or `false`.
-- `actionLinkClickByText --text "Skip"` — click an `ActionLink` by its visible text. Handy for dismissing onboarding panels.
+- `actionLinkClickByText --text "Skip"` — same as `linkClick`. Handy for dismissing onboarding panels.
 
 **High-level flows**
 - `projectCreateFromDialog --name X [--location PATH]` — runs the full Welcome → New Project → fill Name/Location → Create → wait for IdeFrame sequence. After it returns, the project may still be indexing (call `ideWaitSmart` if you need smart mode) and onboarding panels (e.g. "Meet the Islands Theme") may appear — dismiss with `actionLinkClickByText --text "Skip"`.
 
+- `jbaLogin [--token T | --token-file F | --token -]` — EAP login, see below.
+
 **Opening an existing project** (no dedicated command yet — do these steps manually):
 ```sh
 ~/.claude/skills/idea-ui-controller/idea-ui-controller clickButton --xpath "//div[@accessiblename='Open' and @class='JButton']"
-# use runJs --edt to set the path — do NOT use typeText (autocomplete timeouts)
-~/.claude/skills/idea-ui-controller/idea-ui-controller runJs --edt --script "java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner().setText('/your/project/path');"
+# set the path without keystrokes — plain typeText triggers autocomplete on every char
+~/.claude/skills/idea-ui-controller/idea-ui-controller typeText --set --text '/your/project/path'
 ~/.claude/skills/idea-ui-controller/idea-ui-controller sendKey --key ENTER
 # Trust Project dialog always appears on first open of a project in the sandbox
 ~/.claude/skills/idea-ui-controller/idea-ui-controller clickButton --xpath "//div[@accessiblename='Trust Project' and @class='JButton']"
@@ -137,6 +178,45 @@ Each `runIde` call creates a **new** temp sandbox and installs only the plugins 
 ~/.claude/skills/idea-ui-controller/idea-ui-controller ideWaitSmart
 ```
 - `createScratchFile --name X.ext [--language LANG] [--content "..."]` — creates a scratch file via `ScratchRootType` and opens it. Requires a project to be open (`ideVerify`). `--language` is an IntelliJ Language ID (e.g. `kotlin`, `JAVA`, `Python`); defaults to plain text. Note: scratches don't live under the project directory — they're stored under the IDE's config dir (in our case the CLI's sandbox: `<sandbox>/config*/scratches/`).
+
+## EAP login (fresh sandbox)
+
+The modal "Log in to IntelliJ IDEA" blocks everything. There is no browser in Docker, so:
+
+```sh
+U=~/.claude/skills/idea-ui-controller/idea-ui-controller
+$U jbaLogin                          # clicks "Log in to JetBrains Account" -> "Troubles?", prints the OAuth URL (%20-encoded)
+# the user opens the URL on the host, logs in, copies the base64 "IDE authorization token"
+$U jbaLogin --token-file /path/token # setText into the field, "Check Token" once, "Get Started", focuses the frame
+```
+
+- URL and token belong to that dialog instance: don't restart the IDE between the two steps. A token works once; a
+  rejected one prints `Token rejected: Wrong authorization token` — run `jbaLogin` again for a new URL.
+- Don't type the token (`typeText`): a partial submit burns it. Don't press Esc on the dialog: it closes and a
+  "Manage Subscriptions" license dialog takes its place; restart instead.
+- Get secrets from the user via a secret prompt / file, not chat.
+
+## Scripts (`runJs` / `callJs`)
+
+- In scope: `robot` (assertj robot), `log`, and `global` — a `Map` shared by all scripts, the place to keep state
+  between calls (a JS `var` is gone after the script). `component` only exists in fixture-scoped scripts.
+- Prelude functions available in every script:
+  - `loadPluginClass(pluginId, fqn)` — a `Class` from a plugin, searching its main and all content-module class loaders.
+  - `pluginClass(pluginId, fqn)` — the same, wrapped for static calls:
+    `pluginClass('IdeaVIM', 'com.maddyhome.idea.vim.api.VimInjectorKt').getInjector()`.
+  - `normText(s)`, `focusOwner()`, `onEdt(fn)` (runs `fn` on the EDT via `invokeAndWait`, returns its result).
+- Plain package access (`com.foo.Bar`) sees only the platform: a plugin class becomes `JavaPackage ... is not a
+  function`. Use `pluginClass`. A Kotlin file with `@file:JvmName("X")` compiles to `X`, not `XKt` — check with
+  `unzip -l <plugin>/lib/*.jar | grep Name`.
+- Throw strings (`throw 'msg'`). `throw new Error(...)` or a Java exception gives an opaque `Internal Server Error`.
+- Java strings aren't JS strings: `c.getClientProperty('x') === 'error'` is always false; wrap in `String(...)`.
+- `new SomeInterface({ method: fn })` (Rhino JavaAdapter) only overrides **abstract** methods. For interfaces with
+  default methods (`AnActionListener`, many listeners) the JS is never called; build a
+  `java.lang.reflect.Proxy.newProxyInstance(iface.getClassLoader(), [iface], new java.lang.reflect.InvocationHandler({invoke: ...}))`
+  instead (handle `hashCode`/`equals`/`toString`). For actions just use `traceActions`.
+- The robot-server runs one request at a time and the CLI waits up to 120 s (`IUC_READ_TIMEOUT_SECONDS`). A script
+  that outlives that keeps running and every later command queues behind it. Errors are one line; `IUC_DEBUG=1`
+  prints the stack trace.
 
 ## Example flow — open the New Project dialog
 
@@ -226,15 +306,12 @@ Any script valid as a `RemoteRobot.callJs` body works — full Java reflection i
 - **Prefer clicks and keystrokes over scripts.** When you can achieve a goal through the IDE's own UI — menu items, buttons, keyboard shortcuts, dialogs — do that instead of reaching for `callJs`/`runJs`. UI-path actions exercise the real feature surface and are more likely to catch regressions. Reserve scripts for things the UI cannot expose: reading internal state, triggering non-interactive platform APIs, or recovering from a wedged state where no UI path is available.
 - **`runJs` + EDT footgun.** Never call long-running or EDT-blocking operations directly (`ProjectUtil.openOrImport`, full project indexing triggers, modal dialogs spun on the EDT) from a `runJs` with `--edt` — they starve the robot-server and wedge the IDE. Wrap them in `ApplicationManager.getApplication().invokeLater(...)` or use a background task. `WriteAction.run(...)` inside `invokeAndWait(...)` is fine for short write-path edits (that's what `createScratchFile` / `editorInjectText` do).
 - **Do NOT `sleep`.** The CLI is synchronous — every subcommand blocks until it finishes. External waits are pure waste.
-- **`callJs` top-level context.** In a bare `callJs` or `runJs` script (no component fixture), the variables `robot`, `component`, and `by` are **not** available — they only exist inside component-fixture-scoped closures. Use `java.awt.*` APIs directly (e.g. `java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner()`) or the scoped `runJs(fixture, script)` form when you need them.
+- **`callJs` top-level context.** A bare script has `robot`, `log` and `global`, but no `component` — use `focusOwner()` or `java.awt.*` APIs, or a fixture-scoped command.
+- **HTML entities.** `getState` prints `&larr;`, `&hellip;` where the component has `←`, `…`. `getStateSummary` shows them decoded; xpaths and `--text` values with entities are decoded before matching, so both forms work.
 
 ## Known footguns
 
-- **`typeText` in autocomplete / file-chooser fields causes partial-text timeout.** `typeText` fires keystrokes one at a time. In any field that triggers live autocomplete or file-system lookups on each keystroke (file chooser `BorderlessTextField`, path inputs), the synchronous I/O on every character can time out the robot-server socket mid-string. The visible effect: if the field had selected text when `typeText` started, the first keystroke replaces the selection, then typing continues until the socket times out — leaving only the tail of the intended string in the field. **Fix:** use `runJs --edt` with `getFocusOwner().setText(...)` to bypass keystroke simulation entirely:
-  ```sh
-  ~/.claude/skills/idea-ui-controller/idea-ui-controller runJs --edt --script \
-    "java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner().setText('/your/path/here');"
-  ```
+- **`typeText` in autocomplete / file-chooser fields can lose text.** `typeText` fires keystrokes one at a time. In any field that triggers live autocomplete or file-system lookups on each keystroke (file chooser `BorderlessTextField`, path inputs), the synchronous I/O on every character can time out the robot-server socket mid-string. The visible effect: if the field had selected text when `typeText` started, the first keystroke replaces the selection, then typing continues until the socket times out — leaving only the tail of the intended string in the field. **Fix:** `typeText --set --text '/your/path/here'` (setText on the focused field, no keystrokes).
 
 - **`sendKey` has no modifier support.** `sendKey --key A` types `a`, it does not select-all. For any Ctrl/Cmd/Shift/Alt combo, use `sendKeyCombo`. To save a file: `sendKeyCombo --key S --modifier META`. To select-all: `sendKeyCombo --key A --modifier META`.
 

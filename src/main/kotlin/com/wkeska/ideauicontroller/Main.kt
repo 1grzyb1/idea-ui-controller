@@ -3,8 +3,6 @@ package com.wkeska.ideauicontroller
 import com.intellij.remoterobot.RemoteRobot
 import com.intellij.remoterobot.fixtures.ComponentFixture
 import com.intellij.remoterobot.launcher.IdeDownloader
-import com.intellij.remoterobot.launcher.IdeLauncher
-import com.intellij.remoterobot.search.locators.byXpath
 import com.intellij.remoterobot.stepsProcessing.StepLogger
 import com.intellij.remoterobot.stepsProcessing.StepWorker
 import com.intellij.remoterobot.utils.waitFor
@@ -29,13 +27,15 @@ import kotlin.system.exitProcess
 private val STATE_DIR: Path = Path.of(System.getProperty("user.home"), ".idea-ui-controller")
 private val STATE_FILE: Path = STATE_DIR.resolve("state.properties")
 
-internal data class State(val pid: Long, val port: Int, val sandbox: Path) {
+/** [container] is the Docker container the IDE runs in, `null` when it runs directly on the host. */
+internal data class State(val pid: Long, val port: Int, val sandbox: Path, val container: String? = null) {
     fun save() {
         Files.createDirectories(STATE_DIR)
         val props = Properties().apply {
             setProperty("pid", pid.toString())
             setProperty("port", port.toString())
             setProperty("sandbox", sandbox.absolutePathString())
+            container?.let { setProperty("container", it) }
         }
         STATE_FILE.outputStream().use { props.store(it, "idea-ui-controller state") }
     }
@@ -48,6 +48,7 @@ internal data class State(val pid: Long, val port: Int, val sandbox: Path) {
                 pid = props.getProperty("pid").toLong(),
                 port = props.getProperty("port").toInt(),
                 sandbox = Path.of(props.getProperty("sandbox")),
+                container = props.getProperty("container"),
             )
         }
 
@@ -66,7 +67,14 @@ internal fun State.isAlive(): Boolean = try {
     false
 }
 
-internal fun robot(state: State): RemoteRobot = RemoteRobot("http://127.0.0.1:${state.port}", OkHttpClient())
+// OkHttp's default 10s read timeout is shorter than many legitimate scripts (typing, waiting for a dialog). When the
+// client gives up the script keeps running in the IDE and the next command queues behind it, so wait long enough.
+private val READ_TIMEOUT_SECONDS: Long = System.getenv("IUC_READ_TIMEOUT_SECONDS")?.toLongOrNull() ?: 120
+
+internal fun robot(state: State): RemoteRobot = RemoteRobot(
+    "http://127.0.0.1:${state.port}",
+    OkHttpClient.Builder().readTimeout(READ_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS).build(),
+)
 
 internal fun requireRunningState(): State {
     val s = State.load() ?: error("No IDE registered. Run `runIde` first.")
@@ -147,6 +155,11 @@ internal fun zipPluginDirectory(sourceDir: Path, destZip: Path) {
         TypeTextCommand::class,
         FocusWindowCommand::class,
         TreeSelectCommand::class,
+        LinkClickCommand::class,
+        ClipboardCommand::class,
+        FocusedComponentCommand::class,
+        TraceActionsCommand::class,
+        JbaLoginCommand::class,
     ],
 )
 class App
@@ -171,12 +184,29 @@ class ProbeCommand : Callable<Int> {
     }
 }
 
-// Isolated sandbox per run — no display server, no shared state, safe to invoke on every PR
-// in parallel across plugin projects. Blocks until the IDE is reachable, then returns.
+// Isolated sandbox per run, no shared state. Blocks until the IDE is reachable, then returns.
 @Command(name = "runIde", description = ["Launch an IDE with the robot-server plugin and register it as the active daemon."])
 class RunIdeCommand : Callable<Int> {
-    @Parameters(index = "0", description = ["Path to the IDE (e.g. /Applications/IntelliJ IDEA.app)"])
-    lateinit var idePath: Path
+    @Parameters(
+        index = "0",
+        description = [
+            "Path to the IDE (e.g. /Applications/IntelliJ IDEA.app). With --docker also a Linux IDE directory,",
+            "or a build to download: IU-263.7307.44, or IU-eap for the newest EAP (an expired EAP build won't start).",
+        ],
+    )
+    lateinit var ide: String
+
+    @Option(
+        names = ["--docker"],
+        description = [
+            "Run the Linux build of the IDE in a Docker container on a virtual display (Xvfb), so keys and clicks don't touch the host.",
+            "A macOS .app is swapped for the Linux build with the same build number, downloaded once into ~/.idea-ui-controller.",
+        ],
+    )
+    var docker: Boolean = false
+
+    @Option(names = ["--mount"], description = ["With --docker: host directory to mount into the container at the same path (e.g. a test project). May be repeated."])
+    var mounts: List<Path> = emptyList()
 
     @Option(names = ["--port"], description = ["robot-server port (default: 8082)"])
     var port: Int = 8082
@@ -188,7 +218,10 @@ class RunIdeCommand : Callable<Int> {
     var extraPlugins: List<Path> = emptyList()
 
     override fun call(): Int {
-        require(Files.isDirectory(idePath)) { "IDE path is not a directory: $idePath" }
+        val idePath = Path.of(ide)
+        val buildSpec = !Files.exists(idePath) && DockerIdeLauncher.BUILD_SPEC.matches(ide)
+        require(!buildSpec || docker) { "A build number ($ide) works only with --docker" }
+        require(buildSpec || Files.isDirectory(idePath)) { "IDE path is not a directory: $idePath" }
         State.load()?.takeIf { it.isAlive() }?.let {
             System.err.println("An IDE is already registered (pid=${it.pid}, port=${it.port}). Run `stopIde` first.")
             return 1
@@ -199,7 +232,12 @@ class RunIdeCommand : Callable<Int> {
         val http = OkHttpClient()
 
         println("[1/4] Creating sandbox ...")
-        val sandbox = Files.createTempDirectory("idea-ui-controller-sandbox")
+        val sandbox = if (docker) {
+            Files.createDirectories(DockerIdeLauncher.SANDBOXES)
+            Files.createTempDirectory(DockerIdeLauncher.SANDBOXES, "sandbox")
+        } else {
+            Files.createTempDirectory("idea-ui-controller-sandbox")
+        }
         println("      ${sandbox.absolutePathString()}")
 
         println("[2/4] Downloading robot-server plugin (cached after first run) ...")
@@ -220,15 +258,30 @@ class RunIdeCommand : Callable<Int> {
             }
         }
 
-        println("[3/4] Launching IDE process ...")
-        val process = IdeLauncher.launchIde(
-            pathToIde = idePath.toAbsolutePath(),
-            additionalProperties = mapOf("robot-server.port" to port),
-            additionalVmOptions = emptyList(),
-            requiredPluginsArchives = pluginArchives,
-            ideSandboxDir = sandbox,
-        )
+        val process = if (docker) {
+            println("[3/4] Launching IDE in Docker container '${DockerIdeLauncher.CONTAINER_NAME}' ...")
+            val linuxIde = if (buildSpec) DockerIdeLauncher.resolveBuildSpec(ide, http)
+            else DockerIdeLauncher.resolveLinuxIde(idePath.toAbsolutePath(), http)
+            println("      Linux IDE: $linuxIde")
+            DockerIdeLauncher.launch(
+                ide = linuxIde,
+                sandbox = sandbox,
+                plugins = pluginArchives,
+                properties = mapOf("robot-server.port" to port),
+                port = port,
+                mounts = mounts,
+            )
+        } else {
+            println("[3/4] Launching IDE process ...")
+            DetachedIdeLauncher.launch(
+                ide = idePath.toAbsolutePath(),
+                sandbox = sandbox,
+                plugins = pluginArchives,
+                properties = mapOf("robot-server.port" to port),
+            )
+        }
         println("      pid=${process.pid()}")
+        println("      IDE output: ${DetachedIdeLauncher.outputLogOf(sandbox)}")
 
         println("[4/4] Waiting up to ${timeoutSeconds}s for robot-server on :$port ...")
         val remote = RemoteRobot("http://127.0.0.1:$port", http)
@@ -238,7 +291,8 @@ class RunIdeCommand : Callable<Int> {
         var tcpReportedOpen = false
         while (true) {
             check(process.isAlive) {
-                "IDE process (pid=${process.pid()}) exited unexpectedly while waiting for robot-server on :$port"
+                "IDE process (pid=${process.pid()}) exited unexpectedly while waiting for robot-server on :$port" +
+                    expiredHint(sandbox)
             }
             val tcpOpen = try {
                 java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 200); true }
@@ -261,11 +315,20 @@ class RunIdeCommand : Callable<Int> {
         }
 
         val elapsed = (System.currentTimeMillis() - startMs) / 1_000
-        State(process.pid(), port, sandbox).save()
+        State(process.pid(), port, sandbox, DockerIdeLauncher.CONTAINER_NAME.takeIf { docker }).save()
         println("      [${elapsed}s] Robot-server is UP.")
         println("State written to $STATE_FILE.")
         return 0
     }
+}
+
+// An expired EAP build shows "EAP Build Expired" and exits
+private fun expiredHint(sandbox: Path): String {
+    val logs = Files.walk(sandbox, 3).use { s -> s.filter { it.fileName.toString().endsWith(".log") }.toList() }
+    val pattern = Regex("(?i)(eap|build)[^\\n]{0,40}expired")
+    val expired = logs.any { log -> runCatching { pattern.containsMatchIn(Files.readString(log)) }.getOrDefault(false) }
+    return if (!expired) "" else "\nThe logs mention an expired build: an EAP build stops working ~30 days after its release. " +
+        "Use the newest EAP: `runIde --docker IU-eap`."
 }
 
 @Command(name = "stopIde", description = ["Stop the registered IDE daemon and clean up its sandbox."])
@@ -281,7 +344,10 @@ class StopIdeCommand : Callable<Int> {
                 .runJs("com.intellij.openapi.application.ApplicationManager.getApplication().exit(true, true);", false)
         }
         runCatching { ProcessHandle.of(state.pid).ifPresent { it.destroy() } }
-        runCatching {
+        if (state.container != null) {
+            runCatching { DockerIdeLauncher.remove() }
+        } else runCatching {
+            // Only for a host IDE: with Docker the port belongs to Docker Desktop's port forwarder
             val p = ProcessBuilder("lsof", "-iTCP:${state.port}", "-sTCP:LISTEN", "-t").redirectErrorStream(true).start()
             val out = p.inputStream.bufferedReader().readText().trim()
             p.waitFor()
@@ -400,7 +466,7 @@ class GetStateSummaryCommand : Callable<Int> {
         var count = 0
         for (chunk in body.split(Regex("<div\\b")).drop(1)) {
             val tag = chunk.substringBefore(">")
-            val attrs = ATTR.findAll(tag).associate { it.groupValues[1] to it.groupValues[2] }
+            val attrs = ATTR.findAll(tag).associate { it.groupValues[1] to decodeHtmlEntities(it.groupValues[2]) }
             val cls = attrs["class"] ?: continue
             val inAlways = cls in ALWAYS_SHOW
             val inIfText = cls in SHOW_IF_TEXT
@@ -574,21 +640,22 @@ class ClickButtonCommand : Callable<Int> {
     var timeoutSeconds: Long = 10
 
     override fun call(): Int {
-        val xp = xpath
+        val xpExpr = xpath
             ?: text?.let { t -> "//div[@text='$t' or @accessiblename='$t' or @visible_text='$t']" }
             ?: error("Provide --xpath or --text")
+        val locator = xp(xpExpr)
         val state = requireRunningState()
         val r = robot(state)
-        val matches = r.findAll(ComponentFixture::class.java, byXpath(xp))
+        val matches = r.findAll(ComponentFixture::class.java, locator)
         if (matches.isEmpty()) {
             waitFor(Duration.ofSeconds(timeoutSeconds), Duration.ofSeconds(1)) {
-                r.findAll(ComponentFixture::class.java, byXpath(xp)).isNotEmpty()
+                r.findAll(ComponentFixture::class.java, locator).isNotEmpty()
             }
         }
-        val all = r.findAll(ComponentFixture::class.java, byXpath(xp))
-        if (all.size > 1) System.err.println("Warning: ${all.size} matches for $xp — clicking the first.")
+        val all = r.findAll(ComponentFixture::class.java, locator)
+        if (all.size > 1) System.err.println("Warning: ${all.size} matches for $xpExpr — clicking the first.")
         all.first().click()
-        println("Clicked: $xp")
+        println("Clicked: $xpExpr")
         return 0
     }
 }
@@ -655,5 +722,21 @@ class FocusWindowCommand : Callable<Int> {
 }
 
 fun main(args: Array<String>) {
-    exitProcess(CommandLine(App()).execute(*args))
+    val cli = CommandLine(App())
+    // A one-line error instead of a 60-line client stack trace; IUC_DEBUG=1 prints the trace
+    cli.executionExceptionHandler = CommandLine.IExecutionExceptionHandler { e, _, _ ->
+        if (System.getenv("IUC_DEBUG") == "1") e.printStackTrace()
+        else {
+            val ideSide = e as? com.intellij.remoterobot.client.IdeaSideException
+            val root = generateSequence(e as Throwable) { it.cause }.last()
+            val message = ideSide?.message ?: e.message ?: root.message
+            System.err.println("error: ${e::class.simpleName}: $message")
+            if (root !== e && root.message != null && root.message != message) System.err.println("cause: ${root::class.simpleName}: ${root.message}")
+            if (e is java.net.SocketTimeoutException || root is java.net.SocketTimeoutException) {
+                System.err.println("The script may still be running in the IDE; later commands wait for it (one request at a time).")
+            }
+        }
+        1
+    }
+    exitProcess(cli.execute(*args))
 }

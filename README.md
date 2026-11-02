@@ -129,8 +129,9 @@ idea-ui-controller stopIde
 ### Daemon lifecycle
 | Command | Description |
 |---------|-------------|
-| `runIde <path>` | Launch IDE with robot-server, register state |
-| `stopIde` | Kill registered IDE and clean up sandbox |
+| `runIde <path>` | Launch IDE with robot-server, register state. IDE output goes to `<sandbox>/ide-output.log` |
+| `runIde --docker [--mount DIR]... <path>` | Run the Linux build of the IDE in Docker on Xvfb, so the host keyboard and mouse stay free. `--mount` shares a host directory (e.g. a test project) at the same path |
+| `stopIde` | Kill registered IDE and clean up sandbox (and the container in Docker mode) |
 | `probe` | Quick health check — `OK: true` means IDE is reachable |
 
 ### Observation
@@ -148,7 +149,7 @@ idea-ui-controller stopIde
 | `clickAt <x> <y>` | Click at absolute screen coordinates (use `cx`/`cy` from `parseScreenshot`) |
 | `focusWindow [--title T]` | Bring window to front by title substring |
 | `sendKey --key K [--count N]` | Dispatch a named key (`ESCAPE`, `ENTER`, `F1`, …) |
-| `sendKeyCombo --key K [--modifier M]...` | Modifier+key combo (`META`, `CTRL`, `SHIFT`, `ALT`) |
+| `sendKeyCombo --key K [--modifier M]...` | Modifier+key combo (`META`/`CMD`, `CONTROL`/`CTRL`, `SHIFT`, `ALT`/`OPTION`) |
 | `typeText --text T` | Type a literal string one character at a time |
 
 ### Editor
@@ -224,6 +225,7 @@ idea-ui-controller clickAt 908 905
 src/main/kotlin/com/wkeska/ideauicontroller/
   Main.kt      — daemon lifecycle, observation, screenshot, vision pipeline, keyboard primitives
   Pages.kt     — page-scoped commands: editor, dialogs, menus, widgets, flows
+  Extras.kt    — script prelude, links, clipboard, focused component, action tracing, EAP login
 
 scripts/
   install.sh       — build + symlink binary + install Python venv
