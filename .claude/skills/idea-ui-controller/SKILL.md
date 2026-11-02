@@ -21,11 +21,11 @@ The underlying library is JetBrains' **[intellij-ui-test-robot](https://github.c
    ```
    Do **not** run `--help` or `java -version` as a pre-flight — they add noise and `probe` already tells you everything you need.
 
-   If the binary is missing or stale, rebuild from the source repo (`~/IdeaProjects/idea-ui-controller/`):
+   If the binary is missing or stale, (re)install the binary and this skill:
    ```sh
-   cd ~/IdeaProjects/idea-ui-controller && ./gradlew install
+   gh api -H 'Accept: application/vnd.github.raw' repos/1grzyb1/idea-ui-controller/contents/scripts/quick-install.sh | bash
    ```
-   `install` rebuilds the fat-jar, regenerates the stub, and copies it into the skill folder.
+   From a clone: `./scripts/quick-install.sh` (or `./gradlew install` for just the binary).
 
 2. **A built IDE to target.** The IDE path you pass to `runIde` must be a real IntelliJ-family `.app` bundle on macOS (directory ending in `.app`) or the equivalent unpacked distribution directory on Linux/Windows. Example of the correct shape:
    ```

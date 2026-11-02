@@ -94,6 +94,21 @@ Together they form a pipeline that goes from raw pixels → structured element l
 
 ## Installation
 
+Quick install — binary + Claude skill into `~/.claude/skills/idea-ui-controller/`, no Python (the repo is private, so
+`gh` has to be logged in with access to it):
+
+```sh
+gh api -H 'Accept: application/vnd.github.raw' repos/1grzyb1/idea-ui-controller/contents/scripts/quick-install.sh | bash
+# also the QA agents into ~/.claude/agents:
+gh api -H 'Accept: application/vnd.github.raw' repos/1grzyb1/idea-ui-controller/contents/scripts/quick-install.sh | bash -s -- --agents
+```
+
+It clones into `~/.local/share/idea-ui-controller` (override with `IUC_SRC`), or uses the clone it's run from
+(`./scripts/quick-install.sh`). Re-run to update. Needs git, any Java 17+ to start Gradle (JDK 25 is downloaded by
+Gradle if missing) and Docker Desktop for `runIde --docker`.
+
+Full install, including OmniParser for `parseScreenshot`:
+
 ```sh
 ./scripts/install.sh
 ```
@@ -229,6 +244,7 @@ src/main/kotlin/com/wkeska/ideauicontroller/
 
 scripts/
   install.sh       — build + symlink binary + install Python venv
+  quick-install.sh — clone/update + build + copy binary and skill into ~/.claude/skills (no Python)
   omniparse.py     — local OmniParser inference (YOLO + Florence-2, MPS/CPU)
 
 .claude/
