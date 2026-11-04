@@ -205,6 +205,18 @@ class RunIdeCommand : Callable<Int> {
     )
     var docker: Boolean = false
 
+    @Option(
+        names = ["--split-mode"],
+        description = [
+            "With --docker: run the IDE in Remote Development split mode, its backend (serverMode) and the JetBrains Client",
+            "as the frontend, in one container. The robot-server and the UI are on the frontend. Needs --project.",
+        ],
+    )
+    var splitMode: Boolean = false
+
+    @Option(names = ["--project"], description = ["With --split-mode: the project directory (or solution file) the backend opens; mounted automatically."])
+    var project: Path? = null
+
     @Option(names = ["--mount"], description = ["With --docker: host directory to mount into the container at the same path (e.g. a test project). May be repeated."])
     var mounts: List<Path> = emptyList()
 
@@ -222,6 +234,8 @@ class RunIdeCommand : Callable<Int> {
         val buildSpec = !Files.exists(idePath) && DockerIdeLauncher.BUILD_SPEC.matches(ide)
         require(!buildSpec || docker) { "A build number ($ide) works only with --docker" }
         require(buildSpec || Files.isDirectory(idePath)) { "IDE path is not a directory: $idePath" }
+        require(!splitMode || docker) { "--split-mode works only with --docker" }
+        require(!splitMode || project?.exists() == true) { "--split-mode needs an existing --project, got: $project" }
         State.load()?.takeIf { it.isAlive() }?.let {
             System.err.println("An IDE is already registered (pid=${it.pid}, port=${it.port}). Run `stopIde` first.")
             return 1
@@ -263,14 +277,28 @@ class RunIdeCommand : Callable<Int> {
             val linuxIde = if (buildSpec) DockerIdeLauncher.resolveBuildSpec(ide, http)
             else DockerIdeLauncher.resolveLinuxIde(idePath.toAbsolutePath(), http)
             println("      Linux IDE: $linuxIde")
-            DockerIdeLauncher.launch(
-                ide = linuxIde,
-                sandbox = sandbox,
-                plugins = pluginArchives,
-                properties = mapOf("robot-server.port" to port),
-                port = port,
-                mounts = mounts,
-            )
+            if (splitMode) {
+                println("      Split mode: the backend opens $project, the JetBrains Client connects to it")
+                DockerIdeLauncher.launchSplit(
+                    ide = linuxIde,
+                    sandbox = sandbox,
+                    project = project!!,
+                    plugins = pluginArchives.filter { it != robotPlugin },
+                    robotPlugin = robotPlugin,
+                    properties = mapOf("robot-server.port" to port),
+                    port = port,
+                    mounts = mounts,
+                )
+            } else {
+                DockerIdeLauncher.launch(
+                    ide = linuxIde,
+                    sandbox = sandbox,
+                    plugins = pluginArchives,
+                    properties = mapOf("robot-server.port" to port),
+                    port = port,
+                    mounts = mounts,
+                )
+            }
         } else {
             println("[3/4] Launching IDE process ...")
             DetachedIdeLauncher.launch(

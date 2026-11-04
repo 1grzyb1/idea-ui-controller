@@ -139,6 +139,20 @@ idea-ui-controller editorGetText --file "Main.kt"
 idea-ui-controller stopIde
 ```
 
+### Rider in split mode
+
+```sh
+idea-ui-controller runIde --docker --split-mode --project ~/vimtest \
+  --plugin ~/ideavim/build/distributions/IdeaVIM-SNAPSHOT.zip RD-262.11879.110
+# a fresh sandbox asks for a license: start a trial (needs internet)
+idea-ui-controller clickButton --text "Start trial"
+idea-ui-controller clickButton --text "Start Free 30-Day Trial"
+idea-ui-controller clickButton --text "Close"
+```
+
+Both sides run in one container. The robot-server is only on the frontend, so every command acts on the JetBrains
+Client. Logs are in `<sandbox>/backend/` and `<sandbox>/frontend/`.
+
 ## Command reference
 
 ### Daemon lifecycle
@@ -146,6 +160,7 @@ idea-ui-controller stopIde
 |---------|-------------|
 | `runIde <path>` | Launch IDE with robot-server, register state. IDE output goes to `<sandbox>/ide-output.log` |
 | `runIde --docker [--mount DIR]... <path>` | Run the Linux build of the IDE in Docker on Xvfb, so the host keyboard and mouse stay free. `--mount` shares a host directory (e.g. a test project) at the same path |
+| `runIde --docker --split-mode --project DIR <path>` | Run the IDE in Remote Development split mode: the backend opens `DIR`, the JetBrains Client connects to it, and the CLI drives the client. `--plugin`s go to both sides |
 | `stopIde` | Kill registered IDE and clean up sandbox (and the container in Docker mode) |
 | `probe` | Quick health check — `OK: true` means IDE is reachable |
 

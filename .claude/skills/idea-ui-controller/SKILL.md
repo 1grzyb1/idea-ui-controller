@@ -84,11 +84,46 @@ unchanged over `127.0.0.1:<port>`.
 - `screenshot` shows the 1920x1080 virtual screen. `idea.log` is in `<sandbox>/log*/idea.log` as usual; the IDE's raw
   output (`<sandbox>/ide-output.log`) is the container output.
 
+## Split mode (`runIde --docker --split-mode --project DIR`)
+
+Remote Development split mode: the IDE backend (`<ide>.sh serverMode DIR`) opens the project, and the JetBrains Client
+of the same build (`bin/jetbrains_client.sh thinClient <join link>`) connects to it as the frontend. Both run in the one
+container. Works for any IDE whose Linux build has `bin/jetbrains_client.sh`, e.g. Rider:
+
+```sh
+U=~/.claude/skills/idea-ui-controller/idea-ui-controller
+$U runIde --docker --split-mode --project ~/vimtest \
+  --plugin ~/ideavim/build/distributions/IdeaVIM-SNAPSHOT.zip \
+  ~/.idea-ui-controller/linux-ides/RD-262.11879.110-aarch64     # or RD-<build> to download it
+```
+
+- **Everything the CLI does happens on the frontend.** The robot-server is installed there only. The window, the editor,
+  the keyboard and `runJs` (`PlatformUtils.isJetBrainsClient()` is true) all belong to the frontend.
+- **Each `--plugin` is installed on both sides.** Commands that reach the backend (Rider's ReSharper, formatting) run
+  there, and the CLI can't script the backend.
+- `--project` is a directory or a solution file. It is mounted automatically, so no `--mount` is needed for it. The
+  project opens right away, without the welcome screen. It is trusted up front.
+- Sandbox layout: `<sandbox>/backend/` and `<sandbox>/frontend/`, each with its own `config*`, `system*`, `plugins*` and
+  `log*/idea.log`. The backend's raw output (with the join link) is in `<sandbox>/backend-output.log`. The frontend's is
+  in `<sandbox>/ide-output.log`. `<sandbox>/split-mode.sh` is the script the container runs.
+- The title bar shows `Split Mode` as the run target. That is how to tell it's split and not the monolith.
+- **Rider license:** a fresh sandbox opens a modal `Manage Licenses` dialog on the frontend. It needs internet. Start a
+  trial with:
+  ```sh
+  $U clickButton --text "Start trial"              # the segmented button above the form
+  $U clickButton --text "Start Free 30-Day Trial"
+  $U clickButton --text "Close"                    # wait until it shows; the project frame comes up a few seconds later
+  ```
+  The trial lives in that sandbox's config, so it has to be repeated after every `runIde`.
+- Replacing the editor text with `editorInjectText`, or with `Document.setText` in a write command from `runJs`, has no
+  effect in split mode. Edit through real keys (`typeText`, or vim commands when IdeaVim is installed).
+
 ## Command catalog
 
 **Daemon lifecycle**
 - `runIde <path-to-.app>` — launch IDE, wait for robot-server, register state, exit. The IDE's own stdout/stderr go to `<sandbox>/ide-output.log` (printed by `runIde`), not to the CLI's output, so `runIde` returns even when its output is piped or captured. The IDE's `idea.log` is in `<sandbox>/log*/idea.log`.
 - `runIde --docker [--mount DIR]... <path-to-.app | linux-ide-dir | IU-<build> | IU-eap>` — **preferred on macOS.** Runs the Linux build of the same IDE in a Docker container (`idea-ui-controller`) on a virtual display (Xvfb), so typing and clicking never touch the host keyboard, mouse or focus. See "Docker mode" below.
+- `runIde --docker --split-mode --project DIR [--plugin ZIP]... <ide>` — runs the IDE in Remote Development split mode (backend + JetBrains Client frontend) in the container. The CLI drives the frontend. See "Split mode" above.
 - `stopIde` — kill registered IDE + clean sandbox (in Docker mode also removes the container).
 - `probe` — one `callJs("true")` round-trip; quick health check.
 

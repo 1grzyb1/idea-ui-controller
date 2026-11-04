@@ -43,6 +43,23 @@ internal object DetachedIdeLauncher {
         return PreparedIde(startupScript(ide, os), launchEnvironment(ide, os, sandbox, ideProperties))
     }
 
+    /**
+     * Like [prepare], for the JetBrains Client that runs as the frontend of a split-mode backend. `bin/jetbrains_client.sh`
+     * of the same Linux IDE reads its own environment variables and its own default vmoptions.
+     */
+    fun prepareClient(ide: Path, sandbox: Path, plugins: List<Path>, properties: Map<String, Any>): PreparedIde {
+        prepare(ide, Os.LINUX, sandbox, plugins, properties)
+        val vmOptionsFile = sandbox.resolve("idea.vmoptions")
+        vmOptionsFile.writeText(binDir(ide, Os.LINUX).resolve("jetbrains_client64.vmoptions").toFile().readText())
+        return PreparedIde(
+            ide.resolve("bin/jetbrains_client.sh"),
+            mapOf(
+                "JETBRAINS_CLIENT_PROPERTIES" to sandbox.resolve("idea.properties").absolutePathString(),
+                "JETBRAINS_CLIENT_VM_OPTIONS" to vmOptionsFile.absolutePathString(),
+            ),
+        )
+    }
+
     private fun installPlugin(plugin: Path, pluginsDir: Path) {
         if (plugin.name.endsWith(".jar")) {
             Files.copy(plugin, pluginsDir.resolve(plugin.name))

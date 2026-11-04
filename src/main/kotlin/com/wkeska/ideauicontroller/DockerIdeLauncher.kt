@@ -9,7 +9,9 @@ import java.nio.file.StandardCopyOption
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.absolutePathString
 import kotlin.io.path.exists
+import kotlin.io.path.name
 import kotlin.io.path.readText
+import kotlin.io.path.writeText
 
 /**
  * Runs a Linux build of the IDE in a Docker container on a virtual X display (Xvfb).
@@ -64,6 +66,75 @@ internal object DockerIdeLauncher {
             // No update check: its balloon covers the welcome screen of an old build
             properties + mapOf("robot-server.host.public" to true, "ide.no.platform.update" to true),
         )
+        return startContainer(ide, sandbox, port, mounts, prepared.environment, prepared.startupScript)
+    }
+
+    /**
+     * Runs [ide] in Remote Development split mode: its backend (`serverMode`) opens [project], and the JetBrains Client
+     * of the same build connects to it as the frontend, both in one container.
+     *
+     * The robot-server goes into the frontend only, which is where the UI and the frontend parts of plugins run. Every
+     * other plugin in [plugins] is installed on both sides.
+     */
+    fun launchSplit(
+        ide: Path,
+        sandbox: Path,
+        project: Path,
+        plugins: List<Path>,
+        robotPlugin: Path,
+        properties: Map<String, Any>,
+        port: Int,
+        mounts: List<Path>,
+    ): Process {
+        val project = project.toAbsolutePath().normalize()
+        // The project opens right away, without the welcome screen, so trust it up front
+        val common = mapOf("ide.no.platform.update" to true, "idea.trust.all.projects" to true)
+        val backend = DetachedIdeLauncher.prepare(
+            ide, Os.LINUX, Files.createDirectories(sandbox.resolve("backend")), plugins, common,
+        )
+        // `listOf`: a Path is an Iterable<Path>, so `plugins + robotPlugin` would add its name segments
+        val frontend = DetachedIdeLauncher.prepareClient(
+            ide, Files.createDirectories(sandbox.resolve("frontend")), plugins + listOf(robotPlugin),
+            properties + common + mapOf("robot-server.host.public" to true),
+        )
+        // The shell launcher: the native one isn't known to take `serverMode`
+        val backendScript = backend.startupScript.let {
+            if (it.name.endsWith(".sh")) it else it.resolveSibling("${it.name}.sh")
+        }
+        val backendLog = sandbox.resolve("backend-output.log")
+        val script = sandbox.resolve("split-mode.sh")
+        script.writeText(
+            """
+            |#!/bin/sh
+            |# Starts the backend, waits for the join link it prints, then the JetBrains Client connected to it
+            |"${backendScript.absolutePathString()}" serverMode "${project.absolutePathString()}" > "${backendLog.absolutePathString()}" 2>&1 &
+            |i=0
+            |while [ ${'$'}i -lt 600 ]; do
+            |  LINK=${'$'}(grep -o 'Join link: tcp://[^ ]*' "${backendLog.absolutePathString()}" | head -1 | sed 's/Join link: //')
+            |  [ -n "${'$'}LINK" ] && break
+            |  sleep 1; i=${'$'}((i + 1))
+            |done
+            |[ -n "${'$'}LINK" ] || { echo "The backend printed no join link, see ${backendLog.absolutePathString()}"; exit 1; }
+            |echo "Join link: ${'$'}LINK"
+            |# The link already has a #fragment, so remoteId goes after it
+            |exec "${frontend.startupScript.absolutePathString()}" thinClient "${'$'}LINK&remoteId=Split%20Mode"
+            |""".trimMargin()
+        )
+        script.toFile().setExecutable(true)
+
+        // A solution file opens too; its directory is what the container needs
+        val projectDir = if (Files.isRegularFile(project)) project.parent else project
+        return startContainer(ide, sandbox, port, mounts + listOf(projectDir), backend.environment + frontend.environment, script)
+    }
+
+    private fun startContainer(
+        ide: Path,
+        sandbox: Path,
+        port: Int,
+        mounts: List<Path>,
+        environment: Map<String, String>,
+        startupScript: Path,
+    ): Process {
         buildImage()
         remove()
 
@@ -80,8 +151,8 @@ internal object DockerIdeLauncher {
             Files.createDirectories(path)
             command += listOf("-v", "${path.absolutePathString()}:${path.absolutePathString()}")
         }
-        prepared.environment.forEach { (key, value) -> command += listOf("-e", "$key=$value") }
-        command += listOf(IMAGE, prepared.startupScript.absolutePathString())
+        environment.forEach { (key, value) -> command += listOf("-e", "$key=$value") }
+        command += listOf(IMAGE, startupScript.absolutePathString())
 
         return dockerProcess(command)
             .redirectErrorStream(true)

@@ -29,7 +29,7 @@ This project has three tightly coupled pieces. A change to the CLI API (new subc
 
 **Source:** `src/main/kotlin/com/wkeska/ideauicontroller/`
 - `Main.kt` — daemon lifecycle (`runIde`, `stopIde`, `getState`, `probe`, `focusWindow`), generic actions (`clickButton`, `runJs`, `callJs`), and keyboard primitives (`sendKey`, `typeText`).
-- `DetachedIdeLauncher.kt` / `DockerIdeLauncher.kt` — start the IDE on the host, or its Linux build in Docker on Xvfb (`runIde --docker`; image sources in `src/main/resources/docker/`).
+- `DetachedIdeLauncher.kt` / `DockerIdeLauncher.kt` — start the IDE on the host, or its Linux build in Docker on Xvfb (`runIde --docker`; image sources in `src/main/resources/docker/`), also in Remote Development split mode (`runIde --docker --split-mode`).
 - `Pages.kt` — page-scoped commands: Welcome frame, Editor, IDE frame, Dialog, Search Everywhere, Action Menu, Gutter, generic widgets (`listSelect`, `textFieldSet`, `checkboxSet`, `dialogClickButton`), and high-level flows (`projectCreateFromDialog`, `createScratchFile`).
 - `Extras.kt` — the `runJs`/`callJs` script prelude (`loadPluginClass`, `pluginClass`, `normText`, `focusOwner`, `onEdt`), HTML-entity decoding for xpaths and texts, `linkClick`, `clipboard`, `focusedComponent`, `traceActions`, `jbaLogin`.
 
