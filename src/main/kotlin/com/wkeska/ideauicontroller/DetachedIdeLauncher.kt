@@ -35,12 +35,25 @@ internal object DetachedIdeLauncher {
     /** What it takes to start [ide] built for [os]: its startup script and the environment pointing it at the sandbox. */
     class PreparedIde(val startupScript: Path, val environment: Map<String, String>)
 
-    /** Installs [plugins] and writes the sandbox config. All paths stay absolute host paths, so a container mounts them 1:1. */
-    fun prepare(ide: Path, os: Os, sandbox: Path, plugins: List<Path>, properties: Map<String, Any>): PreparedIde {
+    /**
+     * Installs [plugins] and writes the sandbox config. All paths stay absolute host paths, so a container mounts them 1:1.
+     *
+     * With [client], prepares the JetBrains Client bundled with the IDE (`bin/jetbrains_client.sh`) instead of the IDE.
+     */
+    fun prepare(
+        ide: Path,
+        os: Os,
+        sandbox: Path,
+        plugins: List<Path>,
+        properties: Map<String, Any>,
+        client: Boolean = false,
+    ): PreparedIde {
+        Files.createDirectories(sandbox)
         val pluginsDir = Files.createTempDirectory(sandbox, "plugins")
         plugins.forEach { installPlugin(it, pluginsDir) }
         val ideProperties = sandboxProperties(sandbox, pluginsDir) + defaultIdeProperties(ide, os) + properties
-        return PreparedIde(startupScript(ide, os), launchEnvironment(ide, os, sandbox, ideProperties))
+        val startupScript = if (client) binDir(ide, os).resolve("jetbrains_client.sh") else startupScript(ide, os)
+        return PreparedIde(startupScript, launchEnvironment(ide, os, sandbox, ideProperties, client))
     }
 
     private fun installPlugin(plugin: Path, pluginsDir: Path) {
@@ -69,15 +82,28 @@ internal object DetachedIdeLauncher {
         return properties.entries.associate { it.key.toString() to it.value }
     }
 
-    private fun launchEnvironment(ide: Path, os: Os, sandbox: Path, ideProperties: Map<String, Any>): Map<String, String> {
+    private fun launchEnvironment(
+        ide: Path,
+        os: Os,
+        sandbox: Path,
+        ideProperties: Map<String, Any>,
+        client: Boolean,
+    ): Map<String, String> {
         val propertiesFile = sandbox.resolve("idea.properties")
         Files.newBufferedWriter(propertiesFile).use { writer ->
             Properties().apply { ideProperties.forEach { (key, value) -> setProperty(key, value.toString()) } }
                 .store(writer, null)
         }
         val vmOptionsFile = sandbox.resolve("idea.vmoptions")
-        vmOptionsFile.writeText(defaultVmOptionsFile(ide, os).toFile().readText())
+        val defaultVmOptions = if (client) binDir(ide, os).resolve("jetbrains_client64.vmoptions") else defaultVmOptionsFile(ide, os)
+        vmOptionsFile.writeText(defaultVmOptions.toFile().readText())
 
+        if (client) {
+            return mapOf(
+                "JETBRAINS_CLIENT_PROPERTIES" to propertiesFile.absolutePathString(),
+                "JETBRAINS_CLIENT_VM_OPTIONS" to vmOptionsFile.absolutePathString(),
+            )
+        }
         val product = ideProduct(ide, os)
         return mapOf(
             product.getIdePropertiesEnvVarName() to propertiesFile.absolutePathString(),

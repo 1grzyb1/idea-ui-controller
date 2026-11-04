@@ -8,6 +8,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
         libglib2.0-0t64 libnss3 libgbm1 libasound2t64 libdbus-1-3 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \
         libdrm2 libxcomposite1 libxdamage1 libxfixes3 libpango-1.0-0 libcairo2 \
         git ca-certificates procps \
+        libicu74 libssl3t64 zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /entrypoint.sh

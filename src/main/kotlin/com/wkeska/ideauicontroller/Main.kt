@@ -208,6 +208,16 @@ class RunIdeCommand : Callable<Int> {
     @Option(names = ["--mount"], description = ["With --docker: host directory to mount into the container at the same path (e.g. a test project). May be repeated."])
     var mounts: List<Path> = emptyList()
 
+    @Option(
+        names = ["--split"],
+        paramLabel = "PROJECT",
+        description = [
+            "With --docker: Remote Development split mode. The IDE runs as a backend (serverMode) on PROJECT, and the",
+            "JetBrains Client bundled with it connects to it. --plugin goes into both, the robot-server into the client.",
+        ],
+    )
+    var splitProject: Path? = null
+
     @Option(names = ["--port"], description = ["robot-server port (default: 8082)"])
     var port: Int = 8082
 
@@ -221,6 +231,7 @@ class RunIdeCommand : Callable<Int> {
         val idePath = Path.of(ide)
         val buildSpec = !Files.exists(idePath) && DockerIdeLauncher.BUILD_SPEC.matches(ide)
         require(!buildSpec || docker) { "A build number ($ide) works only with --docker" }
+        require(splitProject == null || docker) { "--split works only with --docker" }
         require(buildSpec || Files.isDirectory(idePath)) { "IDE path is not a directory: $idePath" }
         State.load()?.takeIf { it.isAlive() }?.let {
             System.err.println("An IDE is already registered (pid=${it.pid}, port=${it.port}). Run `stopIde` first.")
@@ -263,7 +274,20 @@ class RunIdeCommand : Callable<Int> {
             val linuxIde = if (buildSpec) DockerIdeLauncher.resolveBuildSpec(ide, http)
             else DockerIdeLauncher.resolveLinuxIde(idePath.toAbsolutePath(), http)
             println("      Linux IDE: $linuxIde")
-            DockerIdeLauncher.launch(
+            val project = splitProject
+            if (project != null) {
+                println("      Split mode: backend on $project, backend output: ${sandbox.resolve("backend/ide-output.log")}")
+                DockerIdeLauncher.launchSplit(
+                    ide = linuxIde,
+                    sandbox = sandbox,
+                    project = project,
+                    backendPlugins = pluginArchives - robotPlugin,
+                    clientPlugins = pluginArchives,
+                    properties = mapOf("robot-server.port" to port),
+                    port = port,
+                    mounts = mounts,
+                )
+            } else DockerIdeLauncher.launch(
                 ide = linuxIde,
                 sandbox = sandbox,
                 plugins = pluginArchives,

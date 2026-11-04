@@ -89,6 +89,75 @@ internal object DockerIdeLauncher {
             .start()
     }
 
+    /**
+     * Remote Development split mode: [ide] runs as a backend (`serverMode`) on [project], with [backendPlugins], and the
+     * JetBrains Client bundled with it connects to it, with [clientPlugins] and [properties]. The robot-server must be
+     * one of [clientPlugins]: the CLI drives the client. The backend's output goes to `backend/ide-output.log` in
+     * [sandbox].
+     */
+    fun launchSplit(
+        ide: Path,
+        sandbox: Path,
+        project: Path,
+        backendPlugins: List<Path>,
+        clientPlugins: List<Path>,
+        properties: Map<String, Any>,
+        port: Int,
+        mounts: List<Path>,
+    ): Process {
+        val backendSandbox = sandbox.resolve("backend")
+        val backend = DetachedIdeLauncher.prepare(
+            ide, Os.LINUX, backendSandbox, backendPlugins,
+            mapOf("ide.no.platform.update" to true, "idea.trust.all.projects" to true),
+        )
+        val client = DetachedIdeLauncher.prepare(
+            ide, Os.LINUX, sandbox.resolve("client"), clientPlugins,
+            properties + mapOf("robot-server.host.public" to true, "ide.no.platform.update" to true),
+            client = true,
+        )
+        // The native launcher doesn't know `serverMode`, the shell script does
+        val backendScript = backend.startupScript.let { script ->
+            if (script.fileName.toString().endsWith(".sh")) script else script.resolveSibling("${script.fileName}.sh")
+        }
+        val splitScript = sandbox.resolve("split.sh")
+        javaClass.getResourceAsStream("/docker/split.sh")!!.use { Files.copy(it, splitScript, StandardCopyOption.REPLACE_EXISTING) }
+        splitScript.toFile().setExecutable(true)
+
+        buildImage()
+        remove()
+
+        val command = mutableListOf(
+            docker.absolutePathString(), "run", "--rm", "--name", CONTAINER_NAME,
+            "--shm-size", "2g",
+            "-p", "127.0.0.1:$port:$port",
+            "-e", "LANG=C.UTF-8",
+            "-v", "${ide.absolutePathString()}:${ide.absolutePathString()}:ro",
+            "-v", "${sandbox.absolutePathString()}:${sandbox.absolutePathString()}",
+        )
+        // A project can be a file, e.g. Rider's .sln
+        val projectDir = if (Files.isRegularFile(project)) project.toAbsolutePath().parent else project
+        for (mount in (mounts + listOf(projectDir)).distinctBy { it.toAbsolutePath().normalize() }) {
+            val path = mount.toAbsolutePath().normalize()
+            Files.createDirectories(path)
+            command += listOf("-v", "${path.absolutePathString()}:${path.absolutePathString()}")
+        }
+        backend.environment.forEach { (key, value) -> command += listOf("-e", "BACKEND_$key=$value") }
+        client.environment.forEach { (key, value) -> command += listOf("-e", "$key=$value") }
+        command += listOf(
+            IMAGE,
+            splitScript.absolutePathString(),
+            backendScript.absolutePathString(),
+            project.toAbsolutePath().normalize().absolutePathString(),
+            DetachedIdeLauncher.outputLogOf(backendSandbox).absolutePathString(),
+            client.startupScript.absolutePathString(),
+        )
+
+        return dockerProcess(command)
+            .redirectErrorStream(true)
+            .redirectOutput(DetachedIdeLauncher.outputLogOf(sandbox).toFile())
+            .start()
+    }
+
     /** Force-removes the container; a no-op when it doesn't exist. */
     fun remove() {
         dockerProcess(listOf(docker.absolutePathString(), "rm", "-f", CONTAINER_NAME))

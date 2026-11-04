@@ -84,11 +84,44 @@ unchanged over `127.0.0.1:<port>`.
 - `screenshot` shows the 1920x1080 virtual screen. `idea.log` is in `<sandbox>/log*/idea.log` as usual; the IDE's raw
   output (`<sandbox>/ide-output.log`) is the container output.
 
+## Split mode (`runIde --docker --split PROJECT`)
+
+Remote Development split mode in one container: the IDE runs as a backend (`bin/<ide>.sh serverMode PROJECT`), and the
+JetBrains Client bundled with the IDE (`bin/jetbrains_client.sh thinClient <join link>`) connects to it. The
+robot-server runs in the **client**, so every command drives the frontend; the backend has no robot.
+
+```sh
+runIde --docker --split /tmp/proj/ConsoleApp.sln --timeout-seconds 900 --plugin <plugin dir> ~/.idea-ui-controller/linux-ides/RD-262.11879.110-aarch64
+```
+
+- `--plugin` goes into both the backend and the client; the robot-server only into the client.
+- PROJECT is mounted automatically (its directory, when it's a file). Rider needs a `.sln`, it refuses a plain folder
+  ("Unable to open file").
+- A Rider/CLion backend only works on Linux, so split mode is Docker-only. The macOS Rider has no remote dev host at all.
+- Sandbox layout: `<sandbox>/backend/` and `<sandbox>/client/` (each with `config*`, `system*`, `log*`). The backend's
+  output, with the join link, is `<sandbox>/backend/ide-output.log`; the client's is `<sandbox>/ide-output.log`.
+- `callJs`/`runJs` run in the client (`PlatformUtils.getPlatformPrefix()` is `JetBrainsClient`). Don't change documents
+  from scripts there (`document.setText` in a write command): the client and backend get out of sync, the text comes
+  back and undo stops working. Edit through typed keys instead.
+- A fresh Rider sandbox shows the license dialog: `clickButton --text "Start trial"`, then
+  `clickButton --text "Start Free 30-Day Trial"`, then `clickButton --text "Close"`. No account needed.
+- Opening a file: there's no local VFS path for project files in the client. Use Go to File:
+  `sendKeyCombo --key N --modifier CTRL --modifier SHIFT`, `typeText --text Program.cs`, `sendKey --key ENTER`. Only
+  for a file that exists: otherwise the popup closes and the typed text goes into the editor.
+- Rider in split mode is heavy: the backend, ReSharper and the client share the Docker VM's memory (~8 GB by default).
+  The backend can freeze (`threadDumps-freeze-*` in `<sandbox>/backend/log*/`) or Docker Desktop itself can die
+  (`docker.sock` gone, `runIde` state stale). After a run, `screenshot` and check there's no "No connection to IDE
+  Backend" banner in the editor: results typed after the connection dropped are garbage, the client keeps its own
+  copy of the text and undo does nothing. Start a fresh `runIde` per scenario rather than running many in one session.
+- Reading the caret or selection needs the EDT: `callJs --edt`, otherwise "Access to Editor models ... is allowed
+  either from EDT, or under read action".
+
 ## Command catalog
 
 **Daemon lifecycle**
 - `runIde <path-to-.app>` — launch IDE, wait for robot-server, register state, exit. The IDE's own stdout/stderr go to `<sandbox>/ide-output.log` (printed by `runIde`), not to the CLI's output, so `runIde` returns even when its output is piped or captured. The IDE's `idea.log` is in `<sandbox>/log*/idea.log`.
 - `runIde --docker [--mount DIR]... <path-to-.app | linux-ide-dir | IU-<build> | IU-eap>` — **preferred on macOS.** Runs the Linux build of the same IDE in a Docker container (`idea-ui-controller`) on a virtual display (Xvfb), so typing and clicking never touch the host keyboard, mouse or focus. See "Docker mode" below.
+- `runIde --docker --split PROJECT ...` — Remote Development split mode: backend on PROJECT plus the bundled JetBrains Client, driven through the client. See "Split mode" above.
 - `stopIde` — kill registered IDE + clean sandbox (in Docker mode also removes the container).
 - `probe` — one `callJs("true")` round-trip; quick health check.
 
