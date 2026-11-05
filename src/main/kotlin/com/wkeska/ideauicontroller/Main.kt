@@ -15,57 +15,10 @@ import picocli.CommandLine.Parameters
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
-import java.util.Properties
 import java.util.concurrent.Callable
 import kotlin.io.path.absolutePathString
-import kotlin.io.path.deleteIfExists
 import kotlin.io.path.exists
-import kotlin.io.path.inputStream
-import kotlin.io.path.outputStream
 import kotlin.system.exitProcess
-
-private val STATE_DIR: Path = Path.of(System.getProperty("user.home"), ".idea-ui-controller")
-private val STATE_FILE: Path = STATE_DIR.resolve("state.properties")
-
-/** [container] is the Docker container the IDE runs in, `null` when it runs directly on the host. */
-internal data class State(val pid: Long, val port: Int, val sandbox: Path, val container: String? = null) {
-    fun save() {
-        Files.createDirectories(STATE_DIR)
-        val props = Properties().apply {
-            setProperty("pid", pid.toString())
-            setProperty("port", port.toString())
-            setProperty("sandbox", sandbox.absolutePathString())
-            container?.let { setProperty("container", it) }
-        }
-        STATE_FILE.outputStream().use { props.store(it, "idea-ui-controller state") }
-    }
-
-    companion object {
-        fun load(): State? {
-            if (!STATE_FILE.exists()) return null
-            val props = Properties().also { p -> STATE_FILE.inputStream().use { p.load(it) } }
-            return State(
-                pid = props.getProperty("pid").toLong(),
-                port = props.getProperty("port").toInt(),
-                sandbox = Path.of(props.getProperty("sandbox")),
-                container = props.getProperty("container"),
-            )
-        }
-
-        fun clear() {
-            STATE_FILE.deleteIfExists()
-        }
-    }
-}
-
-internal fun State.isAlive(): Boolean = try {
-    java.net.Socket().use { sock ->
-        sock.connect(java.net.InetSocketAddress("127.0.0.1", port), 500)
-        true
-    }
-} catch (_: Throwable) {
-    false
-}
 
 // OkHttp's default 10s read timeout is shorter than many legitimate scripts (typing, waiting for a dialog). When the
 // client gives up the script keeps running in the IDE and the next command queues behind it, so wait long enough.
@@ -77,8 +30,10 @@ internal fun robot(state: State): RemoteRobot = RemoteRobot(
 )
 
 internal fun requireRunningState(): State {
-    val s = State.load() ?: error("No IDE registered. Run `runIde` first.")
-    check(s.isAlive()) { "Registered IDE (pid=${s.pid}) is not alive. Stale state at $STATE_FILE." }
+    val s = State.load() ?: error(
+        SelectedInstance.name?.let { "No IDE registered as '$it'. Run `runIde --instance $it` first." } ?: "No IDE registered. Run `runIde` first.",
+    )
+    check(s.isAlive()) { "IDE '${s.name}' (pid=${s.pid}) doesn't answer on :${s.port}. Stale state at ${s.file}: `stopIde --instance ${s.name}`." }
     return s
 }
 
@@ -160,17 +115,37 @@ internal fun zipPluginDirectory(sourceDir: Path, destZip: Path) {
         FocusedComponentCommand::class,
         TraceActionsCommand::class,
         JbaLoginCommand::class,
+        IdeCacheCommand::class,
+        InstancesCommand::class,
+        EditorStateCommand::class,
+        OpenProjectCommand::class,
+        OpenFileCommand::class,
+        WaitForCommand::class,
+        IdeLogCommand::class,
     ],
 )
-class App
+class App {
+    @Option(
+        names = ["--instance"],
+        scope = CommandLine.ScopeType.INHERIT,
+        paramLabel = "NAME",
+        description = [
+            "Which IDE to drive when several run (also IUC_INSTANCE). runIde registers it under NAME;",
+            "without it a command uses the only running IDE.",
+        ],
+    )
+    fun instance(name: String) {
+        SelectedInstance.name = name
+    }
+}
 
 @Command(name = "probe", description = ["Run one callJs('true') against the registered IDE and print the result or full exception."])
 class ProbeCommand : Callable<Int> {
-    @Option(names = ["--port"], description = ["robot-server port (default: read from state or 8082)"])
+    @Option(names = ["--port"], description = ["robot-server port (default: the instance's)"])
     var port: Int? = null
 
     override fun call(): Int {
-        val p = port ?: State.load()?.port ?: 8082
+        val p = port ?: State.load()?.port ?: error("No IDE registered. Pass --port.")
         val r = RemoteRobot("http://127.0.0.1:$p", OkHttpClient())
         try {
             val v = r.callJs<Boolean>("true")
@@ -218,8 +193,8 @@ class RunIdeCommand : Callable<Int> {
     )
     var splitProject: Path? = null
 
-    @Option(names = ["--port"], description = ["robot-server port (default: 8082)"])
-    var port: Int = 8082
+    @Option(names = ["--port"], description = ["robot-server port (default: the first free one from 8082)"])
+    var requestedPort: Int? = null
 
     @Option(names = ["--timeout-seconds"], description = ["Max seconds to wait for robot-server (default: 180)"])
     var timeoutSeconds: Long = 180
@@ -227,29 +202,70 @@ class RunIdeCommand : Callable<Int> {
     @Option(names = ["--plugin"], description = ["Extra plugin archive (zip) or unpacked plugin directory to install into the sandbox. May be repeated."])
     var extraPlugins: List<Path> = emptyList()
 
+    @Option(names = ["--restart"], description = ["Stop the IDE registered under this instance name first (instead of failing when it runs)."])
+    var restart: Boolean = false
+
     override fun call(): Int {
         val idePath = Path.of(ide)
         val buildSpec = !Files.exists(idePath) && DockerIdeLauncher.BUILD_SPEC.matches(ide)
         require(!buildSpec || docker) { "A build number ($ide) works only with --docker" }
         require(splitProject == null || docker) { "--split works only with --docker" }
         require(buildSpec || Files.isDirectory(idePath)) { "IDE path is not a directory: $idePath" }
-        State.load()?.takeIf { it.isAlive() }?.let {
-            System.err.println("An IDE is already registered (pid=${it.pid}, port=${it.port}). Run `stopIde` first.")
-            return 1
+        val container = { name: String -> "${DockerIdeLauncher.CONTAINER_PREFIX}$name".takeIf { docker } }
+        // Reserve the name, the port and the sandbox before anything slow, so parallel runIde calls don't collide
+        val reserved = State.locked {
+            for (stale in State.all().filter { !it.isLive() }) {
+                stale.container?.let { runCatching { DockerIdeLauncher.remove(it) } }
+                stale.clear()
+            }
+            val live = State.all()
+            val name = SelectedInstance.name
+                ?: listOf("default").plus((2..99).map { "ide$it" }).first { n -> live.none { it.name == n } }
+            live.firstOrNull { it.name == name }?.let {
+                if (!restart) {
+                    System.err.println("IDE '$name' is already running (pid=${it.pid}, port=${it.port}). Pass --restart, or another --instance.")
+                    return 1
+                }
+                stopInstance(it)
+            }
+            if (!docker) {
+                live.firstOrNull { it.container == null && it.name != name }?.let {
+                    System.err.println(
+                        "IDE '${it.name}' already runs on the host: two host IDEs fight over the real keyboard and mouse. " +
+                            "Use --docker for parallel IDEs.",
+                    )
+                    return 1
+                }
+            }
+            val taken = State.all().map { it.port }.toSet()
+            val port = requestedPort?.also { p -> require(p !in taken) { "Port $p is used by another instance" } }
+                ?: (8082..8182).first { it !in taken && isPortFree(it) }
+            val sandbox = if (docker) {
+                // Leftovers of IDEs that crashed or weren't stopped; never another instance's
+                val used = State.all().map { it.sandbox.toAbsolutePath().normalize() }.toSet()
+                DockerIdeLauncher.pruneSandboxes(keep = used)
+                Files.createDirectories(DockerIdeLauncher.SANDBOXES)
+                Files.createTempDirectory(DockerIdeLauncher.SANDBOXES, "sandbox")
+            } else {
+                Files.createTempDirectory("idea-ui-controller-sandbox")
+            }
+            State(name, ProcessHandle.current().pid(), port, sandbox, container(name)).also { it.save() }
         }
-        State.clear()
+        try {
+            return launch(reserved, buildSpec, idePath)
+        } catch (e: Throwable) {
+            reserved.container?.let { runCatching { DockerIdeLauncher.remove(it) } }
+            reserved.clear()
+            throw e
+        }
+    }
+
+    private fun launch(reserved: State, buildSpec: Boolean, idePath: Path): Int {
+        val (name, _, port, sandbox) = reserved
+        println("[1/4] Instance '$name', port $port, sandbox ${sandbox.absolutePathString()}")
 
         StepWorker.registerProcessor(StepLogger())
         val http = OkHttpClient()
-
-        println("[1/4] Creating sandbox ...")
-        val sandbox = if (docker) {
-            Files.createDirectories(DockerIdeLauncher.SANDBOXES)
-            Files.createTempDirectory(DockerIdeLauncher.SANDBOXES, "sandbox")
-        } else {
-            Files.createTempDirectory("idea-ui-controller-sandbox")
-        }
-        println("      ${sandbox.absolutePathString()}")
 
         println("[2/4] Downloading robot-server plugin (cached after first run) ...")
         val robotPlugin = IdeDownloader(http).downloadRobotPlugin(sandbox)
@@ -269,10 +285,19 @@ class RunIdeCommand : Callable<Int> {
             }
         }
 
+        // No "Trust project" dialog when an agent opens a project
+        val ideProperties = mapOf("robot-server.port" to port, "idea.trust.all.projects" to true)
         val process = if (docker) {
-            println("[3/4] Launching IDE in Docker container '${DockerIdeLauncher.CONTAINER_NAME}' ...")
-            val linuxIde = if (buildSpec) DockerIdeLauncher.resolveBuildSpec(ide, http)
-            else DockerIdeLauncher.resolveLinuxIde(idePath.toAbsolutePath(), http)
+            val container = reserved.container!!
+            println("[3/4] Launching IDE in Docker container '$container' ...")
+            // Resolved and registered under the cache lock, so no parallel eviction deletes it in between
+            val linuxIde = DockerIdeLauncher.withCacheLock {
+                val resolved = if (buildSpec) DockerIdeLauncher.resolveBuildSpec(ide, http)
+                else DockerIdeLauncher.resolveLinuxIde(idePath.toAbsolutePath(), http)
+                reserved.copy(ide = resolved).save()
+                resolved
+            }
+            DockerIdeLauncher.withCacheLock { DockerIdeLauncher.evict(protect = State.all().mapNotNull { it.ide }.toSet()) }
             println("      Linux IDE: $linuxIde")
             val project = splitProject
             if (project != null) {
@@ -283,17 +308,19 @@ class RunIdeCommand : Callable<Int> {
                     project = project,
                     backendPlugins = pluginArchives - robotPlugin,
                     clientPlugins = pluginArchives,
-                    properties = mapOf("robot-server.port" to port),
+                    properties = ideProperties,
                     port = port,
                     mounts = mounts,
+                    container = container,
                 )
             } else DockerIdeLauncher.launch(
                 ide = linuxIde,
                 sandbox = sandbox,
                 plugins = pluginArchives,
-                properties = mapOf("robot-server.port" to port),
+                properties = ideProperties,
                 port = port,
                 mounts = mounts,
+                container = container,
             )
         } else {
             println("[3/4] Launching IDE process ...")
@@ -301,7 +328,7 @@ class RunIdeCommand : Callable<Int> {
                 ide = idePath.toAbsolutePath(),
                 sandbox = sandbox,
                 plugins = pluginArchives,
-                properties = mapOf("robot-server.port" to port),
+                properties = ideProperties,
             )
         }
         println("      pid=${process.pid()}")
@@ -339,9 +366,9 @@ class RunIdeCommand : Callable<Int> {
         }
 
         val elapsed = (System.currentTimeMillis() - startMs) / 1_000
-        State(process.pid(), port, sandbox, DockerIdeLauncher.CONTAINER_NAME.takeIf { docker }).save()
+        State.load(name)!!.copy(pid = process.pid()).save()
         println("      [${elapsed}s] Robot-server is UP.")
-        println("State written to $STATE_FILE.")
+        println("Instance '$name' registered. When several IDEs run, pass --instance $name to every command.")
         return 0
     }
 }
@@ -355,33 +382,90 @@ private fun expiredHint(sandbox: Path): String {
         "Use the newest EAP: `runIde --docker IU-eap`."
 }
 
-@Command(name = "stopIde", description = ["Stop the registered IDE daemon and clean up its sandbox."])
+private fun isPortFree(port: Int): Boolean = try {
+    java.net.ServerSocket().use { it.bind(java.net.InetSocketAddress("127.0.0.1", port)); true }
+} catch (_: java.io.IOException) {
+    false
+}
+
+/** Stops the IDE of [state], deletes its sandbox and its state file. */
+internal fun stopInstance(state: State) {
+    runCatching {
+        RemoteRobot("http://127.0.0.1:${state.port}", OkHttpClient())
+            .runJs("com.intellij.openapi.application.ApplicationManager.getApplication().exit(true, true);", false)
+    }
+    runCatching { ProcessHandle.of(state.pid).ifPresent { it.destroy() } }
+    if (state.container != null) {
+        runCatching { DockerIdeLauncher.remove(state.container) }
+    } else runCatching {
+        // Only for a host IDE: with Docker the port belongs to Docker Desktop's port forwarder
+        val p = ProcessBuilder("lsof", "-iTCP:${state.port}", "-sTCP:LISTEN", "-t").redirectErrorStream(true).start()
+        val out = p.inputStream.bufferedReader().readText().trim()
+        p.waitFor()
+        out.lineSequence().filter { it.isNotBlank() }.forEach { pidStr ->
+            pidStr.trim().toLongOrNull()?.let { pid -> ProcessHandle.of(pid).ifPresent { it.destroy() } }
+        }
+    }
+    runCatching { state.sandbox.toFile().deleteRecursively() }
+    state.clear()
+}
+
+@Command(name = "stopIde", description = ["Stop the IDE (the selected instance, else the only one) and delete its sandbox."])
 class StopIdeCommand : Callable<Int> {
+    @Option(names = ["--all"], description = ["Stop every registered IDE, also those of other agents."])
+    var all: Boolean = false
+
     override fun call(): Int {
-        val state = State.load()
-        if (state == null) {
-            println("No state file.")
-            return 0
+        val states = if (all) State.all() else listOfNotNull(State.load())
+        if (states.isEmpty()) println("No IDE registered.")
+        for (state in states) {
+            stopInstance(state)
+            println("Stopped '${state.name}' (pid=${state.pid}).")
         }
-        runCatching {
-            RemoteRobot("http://127.0.0.1:${state.port}", OkHttpClient())
-                .runJs("com.intellij.openapi.application.ApplicationManager.getApplication().exit(true, true);", false)
+        return 0
+    }
+}
+
+@Command(name = "instances", description = ["List the registered IDEs: name, port, alive, container, sandbox."])
+class InstancesCommand : Callable<Int> {
+    override fun call(): Int {
+        val states = State.all()
+        if (states.isEmpty()) println("No IDE registered.")
+        for (s in states) {
+            val status = if (s.isAlive()) "up" else if (s.isLive()) "starting" else "dead"
+            println("${s.name}\tport=${s.port}\t$status\t${s.container ?: "host"}\t${s.sandbox}")
         }
-        runCatching { ProcessHandle.of(state.pid).ifPresent { it.destroy() } }
-        if (state.container != null) {
-            runCatching { DockerIdeLauncher.remove() }
-        } else runCatching {
-            // Only for a host IDE: with Docker the port belongs to Docker Desktop's port forwarder
-            val p = ProcessBuilder("lsof", "-iTCP:${state.port}", "-sTCP:LISTEN", "-t").redirectErrorStream(true).start()
-            val out = p.inputStream.bufferedReader().readText().trim()
-            p.waitFor()
-            out.lineSequence().filter { it.isNotBlank() }.forEach { pidStr ->
-                pidStr.trim().toLongOrNull()?.let { pid -> ProcessHandle.of(pid).ifPresent { it.destroy() } }
+        return 0
+    }
+}
+
+@Command(
+    name = "ideCache",
+    description = [
+        "List the Linux IDEs downloaded for --docker (most recently used first) with their size.",
+        "--keep N deletes all but the N most recently used (never one a running IDE uses), plus unfinished downloads.",
+    ],
+)
+class IdeCacheCommand : Callable<Int> {
+    @Option(names = ["--keep"], paramLabel = "N", description = ["Delete all but the N most recently used Linux IDEs (0 deletes all unused)."])
+    var keep: Int? = null
+
+    override fun call(): Int {
+        val keep = keep
+        if (keep != null) {
+            val deleted = DockerIdeLauncher.withCacheLock {
+                DockerIdeLauncher.evict(protect = State.all().mapNotNull { it.ide }.toSet(), keep = keep.coerceAtLeast(0))
             }
+            val sandboxes = State.locked {
+                DockerIdeLauncher.pruneSandboxes(keep = State.all().map { it.sandbox.toAbsolutePath().normalize() }.toSet())
+            }
+            println("Deleted ${deleted.size + sandboxes.size} entries.")
         }
-        runCatching { state.sandbox.toFile().deleteRecursively() }
-        State.clear()
-        println("Stopped pid=${state.pid}.")
+        val ides = DockerIdeLauncher.cachedIdes()
+        if (ides.isEmpty()) println("No Linux IDEs cached.")
+        for (ide in ides) {
+            println("${DockerIdeLauncher.sizeOf(ide)}\t${Files.getLastModifiedTime(ide).toInstant()}\t$ide")
+        }
         return 0
     }
 }
@@ -533,20 +617,67 @@ class GetStateSummaryCommand : Callable<Int> {
 @Command(
     name = "screenshot",
     description = [
-        "Capture the IDE using the robot-server's built-in screenshot and save it to a PNG. Prints the output path.",
-        "Last-resort fallback — use getStateSummary for normal observation.",
-        "Only reach for this when a visual element cannot be found through the component tree.",
+        "Capture the screen to a PNG and print its path. --window / --xpath crop to the active window or a component,",
+        "--scale shrinks it: an image costs tokens by its pixel count. Cropped, it prints the origin to map pixels back to",
+        "clickAt coordinates: screen = origin + pixel / scale. Use getStateSummary for normal observation.",
     ],
 )
 class ScreenshotCommand : Callable<Int> {
     @Option(names = ["--output", "-o"], description = ["Output path for the PNG (default: auto temp file)."])
     var output: Path? = null
 
+    @Option(names = ["--window"], description = ["Only the active window (e.g. a dialog)."])
+    var window: Boolean = false
+
+    @Option(names = ["--xpath"], description = ["Only the first component matching this xpath."])
+    var xpath: String? = null
+
+    @Option(names = ["--scale"], description = ["Scale factor, e.g. 0.5 (default 1)."])
+    var scale: Double = 1.0
+
     override fun call(): Int {
+        require(scale > 0 && scale <= 1) { "--scale must be in (0, 1]" }
         val outPath = output ?: Files.createTempFile("idea-ui-controller-screenshot-", ".png")
-        val img = connect().getScreenshot()
+        val r = connect()
+        var img = r.getScreenshot()
+        var origin: java.awt.Rectangle? = null
+        if (window || xpath != null) {
+            val boundsJs = "var p = c.getLocationOnScreen(); p.x + ',' + p.y + ',' + c.getWidth() + ',' + c.getHeight() + ',' + " +
+                "java.awt.Toolkit.getDefaultToolkit().getScreenSize().width"
+            val bounds = if (xpath != null) {
+                r.callJs<String>(r.find(ComponentFixture::class.java, xp(xpath!!), Duration.ofSeconds(10)), "var c = component; $boundsJs", true)
+            } else {
+                r.callJs<String>(
+                    "var c = java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getActiveWindow(); " +
+                        "if (c === null) throw 'No active window'; $boundsJs",
+                    true,
+                )
+            }
+            val (x, y, w, h, screenWidth) = bounds.split(',').map { it.trim().toDouble().toInt() }
+            // A HiDPI screenshot has more pixels than the screen has points
+            val f = img.width.toDouble() / screenWidth
+            val crop = java.awt.Rectangle((x * f).toInt(), (y * f).toInt(), (w * f).toInt(), (h * f).toInt())
+                .intersection(java.awt.Rectangle(0, 0, img.width, img.height))
+            require(!crop.isEmpty) { "The component is off screen: $bounds" }
+            img = img.getSubimage(crop.x, crop.y, crop.width, crop.height)
+            origin = java.awt.Rectangle(x, y, w, h)
+        }
+        if (scale < 1) {
+            val scaled = java.awt.image.BufferedImage((img.width * scale).toInt(), (img.height * scale).toInt(), java.awt.image.BufferedImage.TYPE_INT_RGB)
+            scaled.createGraphics().apply {
+                setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+                drawImage(img, 0, 0, scaled.width, scaled.height, null)
+                dispose()
+            }
+            img = scaled
+        }
         javax.imageio.ImageIO.write(img, "PNG", outPath.toFile())
-        println(outPath.absolutePathString())
+        val info = listOfNotNull(
+            origin?.let { "origin=${it.x},${it.y}" },
+            "size=${img.width}x${img.height}",
+            "scale=$scale".takeIf { scale < 1 },
+        )
+        println("${outPath.absolutePathString()} ${info.joinToString(" ")}")
         return 0
     }
 }
@@ -635,8 +766,11 @@ class ClickAtCommand : Callable<Int> {
     @Parameters(index = "1", description = ["Y coordinate in pixels (screen-absolute)."])
     var y: Int = 0
 
+    @CommandLine.Mixin val stateOption = EditorStateOption()
+
     override fun call(): Int {
-        connect().runJs(
+        val r = connect()
+        r.runJs(
             """
             importClass(java.awt.Point);
             importClass(org.assertj.swing.core.MouseButton);
@@ -648,6 +782,7 @@ class ClickAtCommand : Callable<Int> {
             false,
         )
         println("Clicked at ($x, $y)")
+        stateOption.printIfRequested(r)
         return 0
     }
 }
@@ -745,6 +880,21 @@ class FocusWindowCommand : Callable<Int> {
     }
 }
 
+// The mistakes agents make over and over, and what fixes them
+private fun errorHint(message: String): String? = when {
+    "JavaPackage" in message ->
+        "a plugin's classes aren't visible to plain package access: use pluginClass('<plugin id>', '<fqn>')"
+    "Access to Editor models" in message || "Read access is allowed from inside read-action" in message ->
+        "run it with --edt (or use editorState / editorGetText)"
+    "Access is allowed from write thread only" in message || "Write access is allowed" in message ->
+        "change documents with --edt inside WriteCommandAction.runWriteCommandAction(project, new java.lang.Runnable({ run: function() { ... } })), or use editorInjectText"
+    "is ambiguous" in message ->
+        "Rhino can't choose a Java overload: pass a new java.lang.Runnable({ run: ... }) instead of a function, or convert arguments with String(x)"
+    "Found more than one" in message -> "the xpath matches several components: narrow it (add @class, or an ancestor //div[@class='...']//)"
+    "Failed to find" in message -> "check what's on screen with getStateSummary"
+    else -> null
+}
+
 fun main(args: Array<String>) {
     val cli = CommandLine(App())
     // A one-line error instead of a 60-line client stack trace; IUC_DEBUG=1 prints the trace
@@ -756,6 +906,7 @@ fun main(args: Array<String>) {
             val message = ideSide?.message ?: e.message ?: root.message
             System.err.println("error: ${e::class.simpleName}: $message")
             if (root !== e && root.message != null && root.message != message) System.err.println("cause: ${root::class.simpleName}: ${root.message}")
+            errorHint("$message ${root.message}")?.let { System.err.println("hint: $it") }
             if (e is java.net.SocketTimeoutException || root is java.net.SocketTimeoutException) {
                 System.err.println("The script may still be running in the IDE; later commands wait for it (one request at a time).")
             }

@@ -7,7 +7,9 @@ import com.intellij.remoterobot.search.locators.Locator
 import com.intellij.remoterobot.search.locators.byXpath
 import com.intellij.remoterobot.utils.waitFor
 import picocli.CommandLine.Command
+import picocli.CommandLine.Mixin
 import picocli.CommandLine.Option
+import picocli.CommandLine.Parameters
 import java.io.Serializable
 import java.time.Duration
 import java.util.concurrent.Callable
@@ -63,42 +65,39 @@ private fun clickFixture(f: ComponentFixture) = f.click()
 
 // ---------- Generic JS ----------
 
-@Command(
-    name = "runJs",
-    description = [
-        "Run an arbitrary robot runJs script (no return value).",
-        "Prelude helpers: loadPluginClass(pluginId, fqn), pluginClass(pluginId, fqn), normText(s), focusOwner(), onEdt(fn).",
-    ],
-)
-class RunJsCommand : Callable<Int> {
-    @Option(names = ["--script", "-s"], required = true, description = ["The JS script body."])
-    lateinit var script: String
+private const val PRELUDE_HELP =
+    "Prelude helpers: targetEditor(), targetProject(), loadPluginClass(pluginId, fqn), pluginClass(pluginId, fqn), normText(s), focusOwner(), onEdt(fn)."
 
-    @Option(names = ["--edt"], description = ["Run on the EDT."])
+/** The script of `runJs` / `callJs`: `--script`, `--file`, or the positional argument. */
+abstract class ScriptOptions {
+    @Option(names = ["--script", "-s"], description = ["The JS script body."])
+    var script: String? = null
+
+    @Option(names = ["--file", "-f"], description = ["Read the script from a file."])
+    var file: java.nio.file.Path? = null
+
+    @Parameters(index = "0", arity = "0..1", paramLabel = "SCRIPT", description = ["The JS script body, instead of --script."])
+    var positional: String? = null
+
+    @Option(names = ["--edt"], description = ["Run on the EDT (needed for editor models, documents, Swing)."])
     var edt: Boolean = false
 
+    protected fun body(): String = listOfNotNull(script, file?.let { java.nio.file.Files.readString(it) }, positional)
+        .singleOrNull() ?: error("Pass the script once: --script, --file or as the argument")
+}
+
+@Command(name = "runJs", description = ["Run an arbitrary robot runJs script (no return value).", PRELUDE_HELP])
+class RunJsCommand : ScriptOptions(), Callable<Int> {
     override fun call(): Int {
-        connect().runJs(withPrelude(script), edt)
+        connect().runJs(withPrelude(body()), edt)
         return 0
     }
 }
 
-@Command(
-    name = "callJs",
-    description = [
-        "Call an arbitrary robot callJs script and print the result.",
-        "Prelude helpers: loadPluginClass(pluginId, fqn), pluginClass(pluginId, fqn), normText(s), focusOwner(), onEdt(fn).",
-    ],
-)
-class CallJsCommand : Callable<Int> {
-    @Option(names = ["--script", "-s"], required = true, description = ["The JS script body."])
-    lateinit var script: String
-
-    @Option(names = ["--edt"], description = ["Run on the EDT."])
-    var edt: Boolean = false
-
+@Command(name = "callJs", description = ["Call an arbitrary robot callJs script and print the result.", PRELUDE_HELP])
+class CallJsCommand : ScriptOptions(), Callable<Int> {
     override fun call(): Int {
-        val r = connect().callJs<Serializable>(withPrelude(script), edt)
+        val r = connect().callJs<Serializable>(withPrelude(body()), edt)
         println(r)
         return 0
     }
@@ -190,22 +189,132 @@ class WelcomeHeavyweightPopupCommand : Callable<Int> {
 // ---------- Editor ----------
 
 abstract class EditorScopedOptions {
-    @Option(names = ["--file"], description = ["Editor tab title; if omitted, first EditorComponentImpl is used."])
+    @Option(names = ["--file"], description = ["Editor tab title; if omitted, the focused editor, else the selected one of the active project."])
     var file: String? = null
 
     @Option(names = ["--timeout-seconds"]) var timeoutSeconds: Long = 30
 }
 
+/**
+ * Runs [body] on the EDT with `editor` bound to the editor of tab [file] (bringing it to front), or to `targetEditor()`
+ * when [file] is null. [body] is a function body: it `return`s the value to print.
+ */
+internal fun RemoteRobot.editorCall(file: String?, timeout: Duration, body: String): String {
+    val call = "String((function(editor) { $body })(editor))"
+    if (file != null) {
+        val e = editor(file, timeout)
+        return callJs(e, withPrelude("var editor = component.getEditor(); $call"), true)
+    }
+    return callJs(
+        withPrelude(
+            """
+            var editor = targetEditor();
+            if (editor === null) throw 'No editor: the focus owner is ' + (focusOwner() === null ? '<none>' : focusOwner().getClass().getName()) + ' and no project has a selected text editor';
+            $call
+            """.trimIndent(),
+        ),
+        true,
+    )
+}
+
+private fun RemoteRobot.flushEdt() = runJs(
+    """
+    // Let the X server deliver the events, then let the EDT process them and what they invokeLater'd
+    java.lang.Thread.sleep(50);
+    java.awt.EventQueue.invokeAndWait(new java.lang.Runnable({ run: function() {} }));
+    java.awt.EventQueue.invokeAndWait(new java.lang.Runnable({ run: function() {} }));
+    """.trimIndent(),
+    false,
+)
+
+/** One line of caret/file/viewport facts, then the text around the caret (`|` marks each caret), at most [maxChars]. */
+internal fun RemoteRobot.editorState(file: String?, timeout: Duration, maxChars: Int, extraJs: String?): String =
+    editorCall(
+        file, timeout,
+        """
+        var d = editor.getDocument();
+        var cm = editor.getCaretModel();
+        var c = cm.getPrimaryCaret();
+        var lp = c.getLogicalPosition();
+        var vf = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance().getFile(d);
+        var va = editor.getScrollingModel().getVisibleArea();
+        var top = editor.xyToLogicalPosition(new java.awt.Point(0, va.y)).line + 1;
+        var bottom = editor.xyToLogicalPosition(new java.awt.Point(0, va.y + Math.max(va.height - 1, 0))).line + 1;
+        var shape = '?';
+        try { shape = String(c.getVisualAttributes().getShape().name()); } catch (x) {}
+        var out = 'file=' + (vf === null ? '<none>' : vf.getName()) + ' caret=' + (lp.line + 1) + ':' + (lp.column + 1) +
+            ' offset=' + c.getOffset();
+        if (cm.getCaretCount() > 1) out += ' carets=' + cm.getCaretCount();
+        if (c.hasSelection()) out += ' selection=' + c.getSelectionStart() + '-' + c.getSelectionEnd();
+        out += ' shape=' + shape + ' focus=' + editor.getContentComponent().hasFocus() +
+            ' visible=' + top + '-' + bottom + ' lines=' + d.getLineCount();
+        if (editor.isViewer()) out += ' viewer=true';
+        ${extraJs?.let { "out += ' js=' + String((function(editor) { return ($it); })(editor));" } ?: ""}
+        var max = $maxChars;
+        if (max <= 0) return out;
+        var text = String(d.getText());
+        var lo = 0, hi = text.length, range = '';
+        if (text.length > max) {
+            lo = d.getLineStartOffset(Math.max(0, lp.line - 3));
+            hi = d.getLineEndOffset(Math.min(d.getLineCount() - 1, lp.line + 3));
+            if (hi - lo > max) { lo = Math.max(lo, c.getOffset() - Math.floor(max / 2)); hi = Math.min(hi, lo + max); }
+            range = '[' + (d.getLineNumber(lo) + 1) + '-' + (d.getLineNumber(hi) + 1) + ']';
+        }
+        var offsets = [];
+        var carets = cm.getAllCarets();
+        for (var i = 0; i < carets.size(); i++) {
+            var o = carets.get(i).getOffset();
+            if (o >= lo && o <= hi) offsets.push(o);
+        }
+        offsets.sort(function(a, b) { return b - a; });
+        var part = text.substring(lo, hi);
+        for (var j = 0; j < offsets.length; j++) part = part.substring(0, offsets[j] - lo) + '|' + part.substring(offsets[j] - lo);
+        return out + '\ntext' + range + '=' + JSON.stringify(part);
+        """.trimIndent(),
+    )
+
+/** `--state` on an input command: print [editorState] once the IDE has processed the input. */
+class EditorStateOption {
+    @Option(names = ["--state"], description = ["Afterwards print editorState (caret, file, text around the caret)."])
+    var state: Boolean = false
+
+    fun printIfRequested(r: RemoteRobot) {
+        if (!state) return
+        r.flushEdt()
+        println(runCatching { r.editorState(null, Duration.ofSeconds(5), 400, null) }.getOrElse { "editorState: ${it.message}" })
+    }
+}
+
+@Command(
+    name = "editorState",
+    description = [
+        "Print the editor's state in two lines: file, caret line:col (1-based), offset, carets, selection, caret shape,",
+        "focus, visible lines; then its text, `|` at each caret: all of it up to --max-chars, else the lines around the caret.",
+    ],
+)
+class EditorStateCommand : EditorScopedOptions(), Callable<Int> {
+    @Option(names = ["--max-chars"], description = ["Max text chars to print (default 400, 0 = no text)."])
+    var maxChars: Int = 400
+
+    @Option(names = ["--js"], description = ["Extra JS expression to print as js=..., with `editor` bound (prelude helpers available)."])
+    var js: String? = null
+
+    override fun call(): Int {
+        println(connect().editorState(file, Duration.ofSeconds(timeoutSeconds), maxChars, js))
+        return 0
+    }
+}
+
 @Command(name = "editorVerify", description = ["Verify an editor is open."])
 class EditorVerifyCommand : EditorScopedOptions(), Callable<Int> {
     override fun call(): Int {
-        connect().editor(file, Duration.ofSeconds(timeoutSeconds))
+        connect().editorCall(file, Duration.ofSeconds(timeoutSeconds), "return '';")
         println("Editor${file?.let { " for '$it'" } ?: ""} present.")
         return 0
     }
 }
 
-@Command(name = "editorOpen", description = ["Click the editor tab matching --file to bring it to front."])
+@Command(name = "editorOpen", description = ["Click the editor tab matching --file to bring it to front and focus it."])
 class EditorOpenCommand : Callable<Int> {
     @Option(names = ["--file"], required = true) lateinit var file: String
     @Option(names = ["--timeout-seconds"]) var timeoutSeconds: Long = 30
@@ -219,10 +328,7 @@ class EditorOpenCommand : Callable<Int> {
 @Command(name = "editorGetText", description = ["Print the editor document text."])
 class EditorGetTextCommand : EditorScopedOptions(), Callable<Int> {
     override fun call(): Int {
-        val r = connect()
-        val e = r.editor(file, Duration.ofSeconds(timeoutSeconds))
-        val text = r.callJs<String>(e, "component.getEditor().getDocument().getText()", true)
-        print(text)
+        print(connect().editorCall(file, Duration.ofSeconds(timeoutSeconds), "return editor.getDocument().getText();"))
         return 0
     }
 }
@@ -230,14 +336,7 @@ class EditorGetTextCommand : EditorScopedOptions(), Callable<Int> {
 @Command(name = "editorGetSelectedText", description = ["Print the editor's currently selected text."])
 class EditorGetSelectedTextCommand : EditorScopedOptions(), Callable<Int> {
     override fun call(): Int {
-        val r = connect()
-        val e = r.editor(file, Duration.ofSeconds(timeoutSeconds))
-        val text = r.callJs<String>(
-            e,
-            "(component.getEditor().getSelectionModel().getSelectedText() || '')",
-            true,
-        )
-        print(text)
+        print(connect().editorCall(file, Duration.ofSeconds(timeoutSeconds), "return editor.getSelectionModel().getSelectedText() || '';"))
         return 0
     }
 }
@@ -245,10 +344,7 @@ class EditorGetSelectedTextCommand : EditorScopedOptions(), Callable<Int> {
 @Command(name = "editorCaretOffset", description = ["Print the primary caret offset."])
 class EditorCaretOffsetCommand : EditorScopedOptions(), Callable<Int> {
     override fun call(): Int {
-        val r = connect()
-        val e = r.editor(file, Duration.ofSeconds(timeoutSeconds))
-        val v = r.callJs<Int>(e, "component.getEditor().getCaretModel().getOffset()", true)
-        println(v)
+        println(connect().editorCall(file, Duration.ofSeconds(timeoutSeconds), "return editor.getCaretModel().getOffset();"))
         return 0
     }
 }
@@ -256,10 +352,7 @@ class EditorCaretOffsetCommand : EditorScopedOptions(), Callable<Int> {
 @Command(name = "editorCaretCount", description = ["Print the number of carets."])
 class EditorCaretCountCommand : EditorScopedOptions(), Callable<Int> {
     override fun call(): Int {
-        val r = connect()
-        val e = r.editor(file, Duration.ofSeconds(timeoutSeconds))
-        val v = r.callJs<Int>(e, "component.getEditor().getCaretModel().getCaretCount()", true)
-        println(v)
+        println(connect().editorCall(file, Duration.ofSeconds(timeoutSeconds), "return editor.getCaretModel().getCaretCount();"))
         return 0
     }
 }
@@ -272,16 +365,12 @@ class EditorCaretCountCommand : EditorScopedOptions(), Callable<Int> {
 )
 class EditorIsBlockCursorCommand : EditorScopedOptions(), Callable<Int> {
     override fun call(): Int {
-        val r = connect()
-        val e = r.editor(file, Duration.ofSeconds(timeoutSeconds))
-        val v = r.callJs<Boolean>(
-            e,
+        val v = connect().editorCall(
+            file, Duration.ofSeconds(timeoutSeconds),
             """
-            var shape = component.getEditor().getCaretModel().getPrimaryCaret().getVisualAttributes().getShape();
-            var name = String(shape.name());
-            name === 'BLOCK' || name === 'UNDERSCORE';
+            var name = String(editor.getCaretModel().getPrimaryCaret().getVisualAttributes().getShape().name());
+            return name === 'BLOCK' || name === 'UNDERSCORE';
             """.trimIndent(),
-            true,
         )
         println(v)
         return 0
@@ -294,14 +383,12 @@ class EditorIsBlockCursorCommand : EditorScopedOptions(), Callable<Int> {
 )
 class EditorCaretShapeCommand : EditorScopedOptions(), Callable<Int> {
     override fun call(): Int {
-        val r = connect()
-        val e = r.editor(file, Duration.ofSeconds(timeoutSeconds))
-        val v = r.callJs<String>(
-            e,
-            "String(component.getEditor().getCaretModel().getPrimaryCaret().getVisualAttributes().getShape().name());",
-            true,
+        println(
+            connect().editorCall(
+                file, Duration.ofSeconds(timeoutSeconds),
+                "return editor.getCaretModel().getPrimaryCaret().getVisualAttributes().getShape().name();",
+            ),
         )
-        println(v)
         return 0
     }
 }
@@ -309,29 +396,24 @@ class EditorCaretShapeCommand : EditorScopedOptions(), Callable<Int> {
 @Command(
     name = "editorInjectText",
     description = [
-        "Replace editor document text via a write action.",
+        "Replace editor document text in an undoable write command; `--caret N` then puts the caret at offset N.",
         "Interprets \\n, \\t, \\r, \\\\ in --text so shell-quoted arguments can carry newlines and tabs.",
     ],
 )
 class EditorInjectTextCommand : EditorScopedOptions(), Callable<Int> {
     @Option(names = ["--text", "-t"], required = true) lateinit var text: String
+    @Option(names = ["--caret"], description = ["Caret offset afterwards (default: unchanged)."]) var caret: Int? = null
     override fun call(): Int {
-        val r = connect()
-        val e = r.editor(file, Duration.ofSeconds(timeoutSeconds))
         val escaped = jsEscape(interpretEscapes(text))
-        r.runJs(
-            e,
+        connect().editorCall(
+            file, Duration.ofSeconds(timeoutSeconds),
             """
-            importClass(com.intellij.openapi.application.ApplicationManager);
-            importClass(com.intellij.openapi.application.WriteAction);
-            const editor = component.getEditor();
-            ApplicationManager.getApplication().invokeAndWait(function() {
-                WriteAction.run(function() {
-                    editor.getDocument().setText('$escaped');
-                });
-            });
+            com.intellij.openapi.command.WriteCommandAction.runWriteCommandAction(editor.getProject(), new java.lang.Runnable({
+                run: function() { editor.getDocument().setText('$escaped'); }
+            }));
+            ${caret?.let { "editor.getCaretModel().moveToOffset($it);" } ?: ""}
+            return '';
             """.trimIndent(),
-            false,
         )
         return 0
     }
@@ -342,19 +424,14 @@ class EditorMoveToLineCommand : EditorScopedOptions(), Callable<Int> {
     @Option(names = ["--line"], required = true) var line: Int = 0
     override fun call(): Int {
         require(line >= 1) { "--line must be >= 1" }
-        val r = connect()
-        val e = r.editor(file, Duration.ofSeconds(timeoutSeconds))
-        r.runJs(
-            e,
+        connect().editorCall(
+            file, Duration.ofSeconds(timeoutSeconds),
             """
-            importClass(com.intellij.openapi.editor.ScrollType);
-            const editor = component.getEditor();
-            const document = editor.getDocument();
-            const offset = document.getLineStartOffset(${line - 1});
+            var offset = editor.getDocument().getLineStartOffset(${line - 1});
             editor.getCaretModel().moveToOffset(offset);
-            editor.getScrollingModel().scrollTo(editor.offsetToLogicalPosition(offset), ScrollType.CENTER);
+            editor.getScrollingModel().scrollTo(editor.offsetToLogicalPosition(offset), com.intellij.openapi.editor.ScrollType.CENTER);
+            return '';
             """.trimIndent(),
-            true,
         )
         return 0
     }
@@ -752,6 +829,7 @@ class SendKeyCommand : Callable<Int> {
     var count: Int = 1
     @Option(names = ["--delay-ms"], description = ["Sleep between repeats in ms (default 60)."])
     var delayMs: Long = 60
+    @Mixin val stateOption = EditorStateOption()
 
     override fun call(): Int {
         require(count >= 1) { "--count must be >= 1" }
@@ -761,7 +839,8 @@ class SendKeyCommand : Callable<Int> {
         } catch (_: NoSuchFieldException) {
             error("Unknown key '$key'. Use a VK_* constant name without the VK_ prefix, e.g. ESCAPE, ENTER, F1.")
         }
-        connect().runJs(
+        val r = connect()
+        r.runJs(
             """
             for (var i = 0; i < $count; i++) {
                 robot.pressAndReleaseKey($vk);
@@ -770,6 +849,7 @@ class SendKeyCommand : Callable<Int> {
             """.trimIndent(),
             false,
         )
+        stateOption.printIfRequested(r)
         return 0
     }
 }
@@ -793,6 +873,7 @@ class TypeTextCommand : Callable<Int> {
         description = ["Don't type: setText on the focused JTextComponent on the EDT (tokens, paths, anything long). No key events, no autocomplete."],
     )
     var set: Boolean = false
+    @Mixin val stateOption = EditorStateOption()
 
     override fun call(): Int {
         val resolved = interpretEscapes(text)
@@ -809,6 +890,7 @@ class TypeTextCommand : Callable<Int> {
                 false,
             )
             check(result == "OK") { "--set needs a focused text field. Focus owner: ${result.removePrefix("NOT_TEXT: ")}" }
+            stateOption.printIfRequested(r)
             return 0
         }
         // The robot-server handles one request at a time: a request still typing after the client gave up keeps
@@ -859,6 +941,7 @@ class TypeTextCommand : Callable<Int> {
                 false,
             )
         }
+        stateOption.printIfRequested(r)
         return 0
     }
 }
@@ -885,13 +968,17 @@ class SendKeyComboCommand : Callable<Int> {
     lateinit var key: String
     @Option(names = ["--modifier"], description = ["Modifier key(s): META (or CMD), CONTROL (or CTRL), SHIFT, ALT (or OPTION). May be repeated."])
     var modifiers: List<String> = emptyList()
+    @Mixin val stateOption = EditorStateOption()
 
     override fun call(): Int {
         val mainVk = resolveVk(key)
-        val modVks = modifiers.map { resolveVk(MODIFIER_ALIASES[it.uppercase()] ?: it) }
+        // `--modifier CTRL,SHIFT` and `--modifier CTRL+SHIFT` mean the same as repeating --modifier
+        val modVks = modifiers.flatMap { it.split(',', '+') }.filter { it.isNotBlank() }
+            .map { resolveVk(MODIFIER_ALIASES[it.trim().uppercase()] ?: it.trim()) }
         val press = modVks.joinToString("\n") { "robot.pressKey($it);" }
         val release = modVks.reversed().joinToString("\n") { "robot.releaseKey($it);" }
-        connect().runJs(
+        val r = connect()
+        r.runJs(
             """
             $press
             robot.pressAndReleaseKey($mainVk);
@@ -899,6 +986,7 @@ class SendKeyComboCommand : Callable<Int> {
             """.trimIndent(),
             false,
         )
+        stateOption.printIfRequested(r)
         return 0
     }
 }

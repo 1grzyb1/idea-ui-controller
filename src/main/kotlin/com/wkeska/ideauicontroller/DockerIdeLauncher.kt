@@ -6,6 +6,8 @@ import okhttp3.Request
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.FileTime
+import java.time.Instant
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.absolutePathString
 import kotlin.io.path.exists
@@ -20,7 +22,8 @@ import kotlin.io.path.readText
  */
 internal object DockerIdeLauncher {
 
-    const val CONTAINER_NAME = "idea-ui-controller"
+    /** Each instance runs in its own container, `idea-ui-controller-<instance>`. */
+    const val CONTAINER_PREFIX = "idea-ui-controller-"
     private const val IMAGE = "idea-ui-controller-xvfb:1"
 
     private val HOME: Path = Path.of(System.getProperty("user.home"), ".idea-ui-controller")
@@ -57,6 +60,7 @@ internal object DockerIdeLauncher {
         properties: Map<String, Any>,
         port: Int,
         mounts: List<Path>,
+        container: String,
     ): Process {
         val prepared = DetachedIdeLauncher.prepare(
             ide, Os.LINUX, sandbox, plugins,
@@ -65,10 +69,10 @@ internal object DockerIdeLauncher {
             properties + mapOf("robot-server.host.public" to true, "ide.no.platform.update" to true),
         )
         buildImage()
-        remove()
+        remove(container)
 
         val command = mutableListOf(
-            docker.absolutePathString(), "run", "--rm", "--name", CONTAINER_NAME,
+            docker.absolutePathString(), "run", "--rm", "--name", container,
             "--shm-size", "1g",
             "-p", "127.0.0.1:$port:$port",
             "-e", "LANG=C.UTF-8",
@@ -104,6 +108,7 @@ internal object DockerIdeLauncher {
         properties: Map<String, Any>,
         port: Int,
         mounts: List<Path>,
+        container: String,
     ): Process {
         val backendSandbox = sandbox.resolve("backend")
         val backend = DetachedIdeLauncher.prepare(
@@ -124,10 +129,10 @@ internal object DockerIdeLauncher {
         splitScript.toFile().setExecutable(true)
 
         buildImage()
-        remove()
+        remove(container)
 
         val command = mutableListOf(
-            docker.absolutePathString(), "run", "--rm", "--name", CONTAINER_NAME,
+            docker.absolutePathString(), "run", "--rm", "--name", container,
             "--shm-size", "2g",
             "-p", "127.0.0.1:$port:$port",
             "-e", "LANG=C.UTF-8",
@@ -158,9 +163,9 @@ internal object DockerIdeLauncher {
             .start()
     }
 
-    /** Force-removes the container; a no-op when it doesn't exist. */
-    fun remove() {
-        dockerProcess(listOf(docker.absolutePathString(), "rm", "-f", CONTAINER_NAME))
+    /** Force-removes [container]; a no-op when it doesn't exist. */
+    fun remove(container: String) {
+        dockerProcess(listOf(docker.absolutePathString(), "rm", "-f", container))
             .redirectErrorStream(true)
             .redirectOutput(ProcessBuilder.Redirect.DISCARD)
             .start()
@@ -172,7 +177,10 @@ internal object DockerIdeLauncher {
      * product code and build number, downloaded and unpacked once into [LINUX_IDES].
      */
     fun resolveLinuxIde(ide: Path, http: OkHttpClient): Path {
-        if (ide.resolve("product-info.json").exists()) return ide
+        if (ide.resolve("product-info.json").exists()) {
+            if (ide.normalize().parent == LINUX_IDES) Files.setLastModifiedTime(ide, FileTime.from(Instant.now()))
+            return ide
+        }
         // A macOS .app, or its unwrapped `Contents` directory as the IntelliJ Platform Gradle plugin extracts it
         val productInfo = listOf("Contents/Resources/product-info.json", "Resources/product-info.json")
             .map(ide::resolve)
@@ -206,19 +214,67 @@ internal object DockerIdeLauncher {
         val arch = dockerArchitecture()
 
         val target = LINUX_IDES.resolve("$productCode-$build-$arch")
-        if (target.resolve("product-info.json").exists()) return target
-
-        val archive = DOWNLOADS.resolve("$productCode-$build-linux-$arch.tar.gz")
-        if (!archive.exists()) download(downloadUrl(productCode, build, arch, http), archive, http)
-
-        println("      Unpacking $archive ...")
-        val partial = LINUX_IDES.resolve("$productCode-$build-$arch.partial")
-        partial.toFile().deleteRecursively()
-        Files.createDirectories(partial)
-        run(listOf("tar", "-xzf", archive.absolutePathString(), "-C", partial.absolutePathString(), "--strip-components", "1"))
-        Files.move(partial, target, StandardCopyOption.ATOMIC_MOVE)
+        if (!target.resolve("product-info.json").exists()) {
+            val partial = LINUX_IDES.resolve("$productCode-$build-$arch.partial")
+            partial.toFile().deleteRecursively()
+            Files.createDirectories(partial)
+            // An archive left by an older CLI that kept them
+            val archive = DOWNLOADS.resolve("$productCode-$build-linux-$arch.tar.gz")
+            if (archive.exists()) {
+                println("      Unpacking $archive ...")
+                run(listOf("tar", "-xzf", archive.absolutePathString(), "-C", partial.absolutePathString(), "--strip-components", "1"))
+                Files.delete(archive)
+            } else {
+                downloadAndUnpack(downloadUrl(productCode, build, arch, http), partial, http)
+            }
+            Files.move(partial, target, StandardCopyOption.ATOMIC_MOVE)
+        }
+        Files.setLastModifiedTime(target, FileTime.from(Instant.now()))
         return target
     }
+
+    /** How many downloaded Linux IDEs to keep: `IDEA_UI_CONTROLLER_IDE_CACHE`, 3 by default. */
+    private fun cacheSize(): Int = System.getenv("IDEA_UI_CONTROLLER_IDE_CACHE")?.toIntOrNull()?.coerceAtLeast(1) ?: 3
+
+    /** Downloaded Linux IDEs, most recently used first. */
+    fun cachedIdes(): List<Path> {
+        if (!LINUX_IDES.exists()) return emptyList()
+        return Files.list(LINUX_IDES).use { s -> s.filter { it.resolve("product-info.json").exists() }.toList() }
+            .sortedByDescending { Files.getLastModifiedTime(it) }
+    }
+
+    /**
+     * Serializes changes to [LINUX_IDES] across CLI processes: parallel `runIde` calls download a build once, and an
+     * eviction never deletes a build another one is unpacking or about to register.
+     */
+    inline fun <T> withCacheLock(block: () -> T): T = withFileLock(LINUX_IDES.resolve(".lock"), block)
+
+    /**
+     * Deletes all but the [keep] most recently used Linux IDEs, never one in [protect] (used by registered IDEs), plus
+     * unfinished unpacks and archives left in [DOWNLOADS]. Call it in [withCacheLock]. Returns what it deleted.
+     */
+    fun evict(protect: Set<Path>, keep: Int = cacheSize()): List<Path> {
+        val protected = protect.map { it.toAbsolutePath().normalize() }.toSet()
+        val stale = cachedIdes().drop(keep).filter { it.toAbsolutePath().normalize() !in protected }
+        val leftovers = listOf(LINUX_IDES, DOWNLOADS).filter { it.exists() }.flatMap { dir ->
+            Files.list(dir).use { s -> s.toList() }
+        }.filter { it.fileName.toString() != ".lock" && (it.parent != LINUX_IDES || !it.resolve("product-info.json").exists()) }
+        return deleteAll(stale + leftovers)
+    }
+
+    /** Deletes the sandboxes not in [keep]: those of IDEs that crashed or weren't stopped. Call it in [State.locked]. */
+    fun pruneSandboxes(keep: Set<Path>): List<Path> =
+        if (!SANDBOXES.exists()) emptyList()
+        else deleteAll(Files.list(SANDBOXES).use { s -> s.toList() }.filter { it.toAbsolutePath().normalize() !in keep })
+
+    private fun deleteAll(paths: List<Path>): List<Path> = paths.onEach {
+        println("      Deleting $it")
+        it.toFile().deleteRecursively()
+    }
+
+    fun sizeOf(path: Path): String =
+        runCatching { ProcessBuilder("du", "-sh", path.absolutePathString()).start().inputStream.bufferedReader().readText() }
+            .getOrDefault("").substringBefore('\t').trim().ifEmpty { "?" }
 
     private fun downloadUrl(productCode: String, build: String, arch: String, http: OkHttpClient): String {
         val code = RELEASE_CODES[productCode] ?: error("Don't know the releases API code for product $productCode")
@@ -229,16 +285,17 @@ internal object DockerIdeLauncher {
             ?: error("No $key download for $productCode build $build in $url")
     }
 
-    private fun download(url: String, target: Path, http: OkHttpClient) {
-        println("      Downloading $url (once, ~1.5 GB) ...")
-        Files.createDirectories(target.parent)
-        val partial = target.resolveSibling("${target.fileName}.part")
+    /** Streams the archive straight into `tar`: the ~1.5 GB archive never lands on disk. */
+    private fun downloadAndUnpack(url: String, target: Path, http: OkHttpClient) {
+        println("      Downloading and unpacking $url (once, ~1.5 GB) ...")
+        val tar = ProcessBuilder("tar", "-xzf", "-", "-C", target.absolutePathString(), "--strip-components", "1")
+            .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
         http.newBuilder().readTimeout(5, TimeUnit.MINUTES).build()
             .newCall(Request.Builder().url(url).build()).execute().use { response ->
                 check(response.isSuccessful) { "Download failed: HTTP ${response.code} for $url" }
-                response.body!!.byteStream().use { Files.copy(it, partial, StandardCopyOption.REPLACE_EXISTING) }
+                tar.outputStream.use { response.body!!.byteStream().copyTo(it) }
             }
-        Files.move(partial, target, StandardCopyOption.REPLACE_EXISTING)
+        check(tar.waitFor() == 0) { "Unpacking $url failed" }
     }
 
     /** Builds the Xvfb runtime image from the Dockerfile bundled in the CLI; Docker's layer cache makes repeats instant. */

@@ -37,7 +37,8 @@ internal fun decodeHtmlEntities(s: String): String = ENTITY.replace(s) { m ->
 private val JS_ENTITIES = HTML_ENTITIES.entries.joinToString(", ") { (k, v) -> "'$k': '${jsEscape(v)}'" }
 
 /**
- * Helpers prepended to every `runJs` / `callJs` script.
+ * Helpers prepended to every `runJs` / `callJs` script. [targetEditor] is the focused editor, else the selected text
+ * editor of [targetProject], the project of the active window.
  *
  * Bare Rhino package access (`com.example.Foo`) resolves classes through the robot-server's class loader, which sees
  * the platform but not other plugins: a plugin class then turns into a `JavaPackage` ("... is not a function").
@@ -80,6 +81,19 @@ internal val JS_PRELUDE = """
     }
     function focusOwner() {
         return java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner();
+    }
+    function targetProject() {
+        var p = null;
+        try { p = com.intellij.ide.impl.ProjectUtil.getActiveProject(); } catch (e) {}
+        if (p !== null) return p;
+        var ps = com.intellij.openapi.project.ProjectManager.getInstance().getOpenProjects();
+        return ps.length > 0 ? ps[ps.length - 1] : null;
+    }
+    function targetEditor() {
+        var f = focusOwner();
+        if (f instanceof com.intellij.openapi.editor.impl.EditorComponentImpl) return f.getEditor();
+        var p = targetProject();
+        return p === null ? null : com.intellij.openapi.fileEditor.FileEditorManager.getInstance(p).getSelectedTextEditor();
     }
     function onEdt(fn) {
         var result = null;
@@ -555,3 +569,211 @@ private const val LOGIN_DIALOG_TEXTS_JS = """
     for (var i = 0; i < ws.length; i++) if (ws[i] instanceof javax.swing.JDialog && String(ws[i].getTitle()).indexOf('Log in to') === 0) collect(ws[i]);
     texts.join('\n');
 """
+
+// ---------- Projects and files ----------
+
+@Command(
+    name = "openFile",
+    description = [
+        "Open a file in the active project's editor and focus it. A relative PATH is resolved against the project dir.",
+        "--line/--column (1-based) place the caret.",
+    ],
+)
+class OpenFileCommand : Callable<Int> {
+    @picocli.CommandLine.Parameters(index = "0", paramLabel = "PATH") lateinit var path: String
+    @Option(names = ["--line"]) var line: Int? = null
+    @Option(names = ["--column"]) var column: Int = 1
+    @Option(names = ["--state"], description = ["Afterwards print editorState."]) var state: Boolean = false
+
+    override fun call(): Int {
+        val r = connect()
+        println(r.openFile(path, line, column))
+        if (state) println(r.editorState(null, java.time.Duration.ofSeconds(5), 400, null))
+        return 0
+    }
+}
+
+internal fun RemoteRobot.openFile(path: String, line: Int?, column: Int): String = callJs(
+    withPrelude(
+        """
+        var p = targetProject();
+        if (p === null) throw 'No project is open';
+        var path = '${jsEscape(path)}';
+        if (path.charAt(0) !== '/') path = p.getBasePath() + '/' + path;
+        var f = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByPath(path);
+        if (f === null) throw 'No such file: ' + path;
+        var d = ${if (line != null) "new com.intellij.openapi.fileEditor.OpenFileDescriptor(p, f, ${line - 1}, ${column - 1})" else "new com.intellij.openapi.fileEditor.OpenFileDescriptor(p, f)"};
+        var e = com.intellij.openapi.fileEditor.FileEditorManager.getInstance(p).openTextEditor(d, true);
+        if (e === null) com.intellij.openapi.fileEditor.FileEditorManager.getInstance(p).openFile(f, true);
+        'Opened ' + path + (e === null ? ' (not a text editor)' : '');
+        """.trimIndent(),
+    ),
+    true,
+)
+
+@Command(
+    name = "openProject",
+    description = [
+        "Open a project directory (or .sln, pom.xml, ...) in a new frame, wait until it's open and indexed, optionally open --file.",
+        "runIde trusts all projects, so there is no trust dialog. With --docker, PATH has to be --mount'ed.",
+    ],
+)
+class OpenProjectCommand : Callable<Int> {
+    @picocli.CommandLine.Parameters(index = "0", paramLabel = "PATH") lateinit var path: Path
+    @Option(names = ["--file"], description = ["File to open afterwards, relative to the project dir or absolute."]) var file: String? = null
+    @Option(names = ["--line"], description = ["1-based caret line in --file."]) var line: Int? = null
+    @Option(names = ["--no-wait-smart"], description = ["Don't wait for indexing to finish."]) var noWaitSmart: Boolean = false
+    @Option(names = ["--timeout-seconds"]) var timeoutSeconds: Long = 180
+    @Option(names = ["--state"], description = ["Afterwards print editorState."]) var state: Boolean = false
+
+    override fun call(): Int {
+        val r = connect()
+        val abs = path.toAbsolutePath().normalize()
+        val name = abs.fileName.toString().substringBeforeLast('.').takeIf { Files.isRegularFile(abs) } ?: abs.fileName.toString()
+        val openJs = """
+            var ps = com.intellij.openapi.project.ProjectManager.getInstance().getOpenProjects();
+            var found = 'no';
+            for (var i = 0; i < ps.length; i++) {
+                var b = String(ps[i].getBasePath());
+                if (b === '${jsEscape(abs.toString())}' || b === '${jsEscape(abs.parent?.toString() ?: "")}' || String(ps[i].getName()) === '${jsEscape(name)}')
+                    found = ps[i].isInitialized() ? 'yes' : 'opening';
+            }
+            found;
+        """.trimIndent()
+        if (r.callJs<String>(openJs, false) == "no") {
+            r.runJs(
+                """
+                com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(function() {
+                    com.intellij.ide.impl.ProjectUtil.openOrImport(java.nio.file.Paths.get('${jsEscape(abs.toString())}'), null, true);
+                });
+                """.trimIndent(),
+                false,
+            )
+        }
+        val deadline = System.currentTimeMillis() + timeoutSeconds * 1000
+        while (runCatching { r.callJs<String>(openJs, false) }.getOrDefault("no") != "yes") {
+            check(System.currentTimeMillis() < deadline) {
+                "Project $abs didn't open within ${timeoutSeconds}s. Focus: " + focusLine(r)
+            }
+            Thread.sleep(500)
+        }
+        if (!noWaitSmart) {
+            while (!runCatching { r.callJs<Boolean>("com.intellij.openapi.project.DumbService.isDumb(${projectByNameJs(name)}) === false", false) }.getOrDefault(false)) {
+                check(System.currentTimeMillis() < deadline) { "Project $abs still indexing after ${timeoutSeconds}s" }
+                Thread.sleep(1000)
+            }
+        }
+        println("Project '$name' open${if (noWaitSmart) "" else " and smart"}. Focus: ${focusLine(r)}")
+        file?.let { println(r.openFile(it, line, 1)) }
+        if (state) println(r.editorState(null, java.time.Duration.ofSeconds(5), 400, null))
+        return 0
+    }
+
+    private fun projectByNameJs(name: String) = """
+        (function() {
+            var ps = com.intellij.openapi.project.ProjectManager.getInstance().getOpenProjects();
+            for (var i = 0; i < ps.length; i++) if (String(ps[i].getName()) === '${jsEscape(name)}') return ps[i];
+            return ps[ps.length - 1];
+        })()
+    """.trimIndent()
+
+    private fun focusLine(r: RemoteRobot): String = runCatching {
+        r.callJs<String>(
+            """
+            var w = java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getActiveWindow();
+            w === null ? '<no active window>' : (w.getClass().getSimpleName() + (w.getTitle ? " '" + w.getTitle() + "'" : ''));
+            """.trimIndent(),
+            false,
+        )
+    }.getOrDefault("?")
+}
+
+// ---------- Waiting ----------
+
+@Command(
+    name = "waitFor",
+    description = ["Wait until a component matching --text or --xpath shows up (or, with --gone, disappears). Use instead of sleep."],
+)
+class WaitForCommand : Callable<Int> {
+    @Option(names = ["--xpath"]) var xpath: String? = null
+    @Option(names = ["--text"], description = ["Visible text or accessible name, as in clickButton --text."]) var text: String? = null
+    @Option(names = ["--gone"]) var gone: Boolean = false
+    @Option(names = ["--timeout-seconds"]) var timeoutSeconds: Long = 10
+
+    override fun call(): Int {
+        val expr = xpath ?: text?.let { "//div[@text='$it' or @accessiblename='$it' or @visible_text='$it']" }
+            ?: error("Provide --xpath or --text")
+        val r = connect()
+        val locator = xp(expr)
+        val start = System.currentTimeMillis()
+        val deadline = start + timeoutSeconds * 1000
+        while (true) {
+            val present = runCatching { r.findAll(com.intellij.remoterobot.fixtures.ComponentFixture::class.java, locator).isNotEmpty() }.getOrDefault(false)
+            if (present != gone) break
+            check(System.currentTimeMillis() < deadline) { "Still ${if (gone) "present" else "absent"} after ${timeoutSeconds}s: $expr" }
+            Thread.sleep(250)
+        }
+        println("${if (gone) "Gone" else "Found"} after ${System.currentTimeMillis() - start} ms: $expr")
+        return 0
+    }
+}
+
+// ---------- idea.log ----------
+
+
+@Command(
+    name = "ideLog",
+    description = [
+        "Print the running IDE's idea.log, filtered: --since-mark (only lines after the last --mark), --grep, --errors, --tail.",
+        "Typical: `ideLog --mark`, reproduce, `ideLog --since-mark --grep MARKER`. Lines are cut at --width chars.",
+    ],
+)
+class IdeLogCommand : Callable<Int> {
+    @Option(names = ["--mark"], description = ["Remember the current end of the log and print nothing else."]) var mark: Boolean = false
+    @Option(names = ["--since-mark"], description = ["Only lines written after the last --mark."]) var sinceMark: Boolean = false
+    @Option(names = ["--grep"], description = ["Only lines matching this regex (Java syntax)."]) var grep: String? = null
+    @Option(names = ["--errors"], description = ["Only ERROR entries, each with its next 2 lines (the exception)."]) var errors: Boolean = false
+    @Option(names = ["--tail"], description = ["Print at most the last N matching lines (default 40)."]) var tail: Int = 40
+    @Option(names = ["--width"], description = ["Cut lines at N chars (default 300)."]) var width: Int = 300
+    @Option(names = ["--backend"], description = ["Split mode: the backend's log instead of the client's."]) var backend: Boolean = false
+
+    override fun call(): Int {
+        val state = State.load() ?: error("No IDE registered. Run `runIde` first.")
+        val sandbox = state.sandbox
+        val logMark = state.file.resolveSibling("${state.name}.logmark")
+        val logs = Files.walk(sandbox, 4).use { s ->
+            s.filter { it.fileName.toString() == "idea.log" && ("${it}".contains("/backend/") == backend) }.toList()
+        }
+        val log = logs.maxByOrNull { Files.getLastModifiedTime(it) } ?: error("No idea.log under $sandbox")
+        val lines = Files.readAllLines(log, Charsets.UTF_8)
+        if (mark) {
+            Files.writeString(logMark, "$log\n${lines.size}")
+            println("Marked $log at line ${lines.size}.")
+            return 0
+        }
+        var from = 0
+        if (sinceMark) {
+            val (markedLog, count) = (if (Files.exists(logMark)) Files.readAllLines(logMark) else emptyList()) + listOf("", "")
+            if (markedLog == log.toString()) from = count.toIntOrNull()?.coerceAtMost(lines.size) ?: 0
+            else System.err.println("No --mark for $log: printing from the start.")
+        }
+        val regex = grep?.let { Regex(it) }
+        val picked = mutableListOf<String>()
+        var i = from
+        while (i < lines.size) {
+            val line = lines[i]
+            if (errors) {
+                if (line.contains(" ERROR - ") && (regex == null || regex.containsMatchIn(line))) {
+                    picked += lines.subList(i, minOf(i + 3, lines.size)).joinToString("\n") { it.take(width) }
+                    i += 3
+                    continue
+                }
+            } else if (regex == null || regex.containsMatchIn(line)) picked += line.take(width)
+            i++
+        }
+        val shown = picked.takeLast(tail)
+        println("$log: lines ${from + 1}-${lines.size}, ${picked.size} matching${if (shown.size < picked.size) ", last ${shown.size} shown" else ""}")
+        shown.forEach(::println)
+        return 0
+    }
+}

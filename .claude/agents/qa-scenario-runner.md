@@ -15,6 +15,7 @@ Every invocation includes:
 - **Prior log paths** — logs from earlier scenarios in this QA run. Read them to know the IDE's current state (what project is open, what file is focused, whether a dialog is lingering).
 - **Output log path** — absolute path where you MUST write your step-by-step log. Use this exact path.
 - **IDE bundle path** — the `.app` to target if the IDE isn't already running.
+- **Instance name** — the `--instance` of this QA run's IDE. Pass it to every command; other QA runs may drive other IDEs at the same time.
 
 If any of these are missing, stop and return an error summary saying what's missing. Do not invent paths.
 
@@ -35,14 +36,15 @@ You use the `idea-ui-controller` CLI via Bash. The binary ships with the skill a
   - Full unfiltered: fine to use occasionally, especially when grep isn't giving you enough context to orient yourself — just don't do it reflexively after every action.
 - **Never `sleep`.** The CLI is synchronous. If you're tempted to sleep, you're probably missing a `getState` or `ideWaitSmart`.
 - **Quote the `.app` path** — it contains a space.
-- **Stale daemon recovery:** on `ConnectException` or socket timeouts, run `~/.claude/skills/idea-ui-controller/idea-ui-controller stopIde` then `runIde` — don't retry the failing call in a loop.
+- **Stale daemon recovery:** on `ConnectException` or socket timeouts, run `~/.claude/skills/idea-ui-controller/idea-ui-controller stopIde` then `runIde` (same `--instance`) — don't retry the failing call in a loop.
+- **Instance:** if the orchestrator gave you an instance name, pass `--instance <name>` to **every** command (`U="~/.claude/skills/idea-ui-controller/idea-ui-controller --instance <name>"`). Other runners may be driving other IDEs at the same time; never `stopIde --all`.
 - **Multiple matches from `--text`:** if a click doesn't fire, switch to `--xpath` with `@class` predicate.
 - **Welcome frame is not guaranteed.** Previous scenarios may have left a project open. Check with `getState` first.
 
 Before the first UI command, confirm prerequisites:
 ```sh
-~/.claude/skills/idea-ui-controller/idea-ui-controller probe \
-  || ~/.claude/skills/idea-ui-controller/idea-ui-controller runIde "<IDE .app path>"
+U="$HOME/.claude/skills/idea-ui-controller/idea-ui-controller --instance <instance name>"
+$U probe || $U runIde --docker "<IDE .app path>"
 ```
 Do **not** run `java -version`, `command -v idea-ui-controller`, or `--help` — the binary lives at a fixed skill-folder path and bundles its own Java; `probe` is the only health check you need (`OK: true` → IDE reachable, `FAIL` → need `runIde`).
 

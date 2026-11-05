@@ -90,7 +90,7 @@ Together they form a pipeline that goes from raw pixels → structured element l
 └─────────────────────────────────┘
 ```
 
-`runIde` downloads and injects the `robot-server` plugin into a sandboxed IDE copy, then waits for it to become reachable. Every subsequent command communicates with that plugin over HTTP. State (PID, port, sandbox path) is kept at `~/.idea-ui-controller/state.properties`.
+`runIde` downloads and injects the `robot-server` plugin into a sandboxed IDE copy, then waits for it to become reachable. Every subsequent command communicates with that plugin over HTTP. State (PID, port, sandbox path) is kept per IDE at `~/.idea-ui-controller/instances/<instance>.properties`; several IDEs can run side by side with `--instance NAME` (see the skill).
 
 ## Installation
 

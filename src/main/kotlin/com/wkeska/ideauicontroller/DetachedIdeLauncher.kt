@@ -65,7 +65,7 @@ internal object DetachedIdeLauncher {
     }
 
     private fun sandboxProperties(sandbox: Path, pluginsDir: Path): Map<String, Any> = mapOf(
-        "idea.config.path" to Files.createTempDirectory(sandbox, "config").toAbsolutePath(),
+        "idea.config.path" to Files.createTempDirectory(sandbox, "config").toAbsolutePath().also(::skipOnboarding),
         "idea.system.path" to Files.createTempDirectory(sandbox, "system").toAbsolutePath(),
         "idea.plugins.path" to pluginsDir.toAbsolutePath(),
         "idea.log.path" to Files.createTempDirectory(sandbox, "log").toAbsolutePath(),
@@ -75,6 +75,22 @@ internal object DetachedIdeLauncher {
         "ide.mac.file.chooser.native" to "false",
         "idea.is.internal" to "true",
     )
+
+    // The "Meet the Islands Theme" / new UI tour dialog takes the focus from the first project an agent opens.
+    // NewUiOnboardingUtil.shouldProposeOnboarding is false once it was proposed for some version.
+    private fun skipOnboarding(config: Path) {
+        val options = Files.createDirectories(config.resolve("options"))
+        Files.writeString(
+            options.resolve("other.xml"),
+            """
+            <application>
+              <component name="PropertiesComponent">
+                <property name="experimental.ui.onboarding.proposed.version" value="999.0" />
+              </component>
+            </application>
+            """.trimIndent(),
+        )
+    }
 
     private fun defaultIdeProperties(ide: Path, os: Os): Map<String, Any> {
         val properties = Properties()

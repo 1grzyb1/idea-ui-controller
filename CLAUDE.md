@@ -46,7 +46,7 @@ After any CLI change, run `./gradlew install` — agents reading SKILL.md invoke
 
 **Runtime requirement:** Java 25. The fat-jar stub passes the required `--add-opens` flags automatically and hardcodes `JAVA_HOME` at build time — no env vars required to run the CLI.
 
-**State:** `~/.idea-ui-controller/state.properties` — holds `pid`, `port`, `sandbox` of the running daemon. One IDE at a time.
+**State:** `~/.idea-ui-controller/instances/<instance>.properties` — `pid`, `port`, `sandbox`, `container`, `ide` of each running IDE (`Instances.kt`). Several IDEs run side by side, one per `--instance NAME` (global option, or `IUC_INSTANCE`); each gets its own port, sandbox and Docker container `idea-ui-controller-<name>`. Reserving a name/port/sandbox and changing the Linux IDE cache are serialized across CLI processes by file locks.
 
 **Adding a new subcommand checklist:**
 1. Write the `@Command` class in `Main.kt`, `Pages.kt` or `Extras.kt`.

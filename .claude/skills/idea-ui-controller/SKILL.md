@@ -47,7 +47,23 @@ The underlying library is JetBrains' **[intellij-ui-test-robot](https://github.c
 
 - **First `runIde` per machine: ~60 seconds.** The CLI downloads `robot-server-plugin-*.zip` (~2 MB) from JetBrains' public Maven on the first call and then cold-starts the IDE.
 - **Subsequent runs on the same machine: ~10 seconds.** The plugin is cached; only IDE cold start matters.
-- The IDE stays running as a daemon across CLI invocations. Only `stopIde` (or killing the process) tears it down. State is kept at `~/.idea-ui-controller/state.properties`.
+- The IDE stays running as a daemon across CLI invocations. Only `stopIde` (or killing the process) tears it down. State is kept at `~/.idea-ui-controller/instances/<instance>.properties`.
+
+## Several IDEs at once (`--instance NAME`)
+
+Several agents can each drive their own IDE at the same time. Every IDE is a named **instance** with its own port,
+sandbox and (with `--docker`) container `idea-ui-controller-<name>`.
+
+- **When other agents may be running IDEs too, always pass `--instance <unique name>`** (e.g. your scenario slug) to
+  `runIde` **and to every later command**, before or after the subcommand: `$U --instance vim-undo editorState`. Or
+  set `IUC_INSTANCE=vim-undo` in the same shell command. Easiest: `U="$HOME/.claude/skills/idea-ui-controller/idea-ui-controller --instance vim-undo"`.
+- Without `--instance`, `runIde` names it `default` (or `ide2`, `ide3`… if taken) and picks the first free port from 8082;
+  other commands use the only running IDE and fail with "2 IDEs are running (a, b): pass --instance" when there are more.
+  So a command never silently drives someone else's IDE.
+- `instances` lists them (name, port, up/starting/dead, container, sandbox). `stopIde` stops only the selected one;
+  `stopIde --all` stops every one, also other agents' — don't use it unless told to.
+- Parallel IDEs need `--docker`: two host IDEs would fight over the real keyboard and mouse, so `runIde` refuses a
+  second host one. Each Docker IDE takes ~2–4 GB of the Docker VM's memory.
 
 ## Sandbox is fresh on every `runIde`
 
@@ -65,8 +81,10 @@ unchanged over `127.0.0.1:<port>`.
 
 - Needs Docker Desktop running. The CLI finds `docker` on `PATH` or in `~/.docker/bin`.
 - Pass the macOS `.app` as usual: the CLI reads its product code and build number and uses the Linux build of the same
-  version (aarch64 or x86_64, whatever Docker runs), downloaded once (~1.5 GB) to `~/.idea-ui-controller/downloads` and
-  unpacked to `~/.idea-ui-controller/linux-ides`. A Linux IDE directory works too, and so does a macOS IDE unpacked by
+  version (aarch64 or x86_64, whatever Docker runs), downloaded once (~1.5 GB, streamed, the archive isn't kept) and
+  unpacked to `~/.idea-ui-controller/linux-ides` (3–7 GB each). Only the 3 most recently used builds are kept
+  (`IDEA_UI_CONTROLLER_IDE_CACHE=N` to change); `runIde --docker` deletes older ones and sandboxes left by IDEs that
+  weren't stopped. `ideCache` lists what's cached. A Linux IDE directory works too, and so does a macOS IDE unpacked by
   the IntelliJ Platform Gradle plugin (a `Contents` directory without the `.app` around it, e.g.
   `~/.gradle/caches/*/transforms/*/transformed/idea-2026.2.3-aarch64`).
 - Instead of a path you can pass a build to download: `runIde --docker IU-263.7307.44`, or `IU-eap` for the newest EAP
@@ -122,8 +140,11 @@ runIde --docker --split /tmp/proj/ConsoleApp.sln --timeout-seconds 900 --plugin 
 - `runIde <path-to-.app>` — launch IDE, wait for robot-server, register state, exit. The IDE's own stdout/stderr go to `<sandbox>/ide-output.log` (printed by `runIde`), not to the CLI's output, so `runIde` returns even when its output is piped or captured. The IDE's `idea.log` is in `<sandbox>/log*/idea.log`.
 - `runIde --docker [--mount DIR]... <path-to-.app | linux-ide-dir | IU-<build> | IU-eap>` — **preferred on macOS.** Runs the Linux build of the same IDE in a Docker container (`idea-ui-controller`) on a virtual display (Xvfb), so typing and clicking never touch the host keyboard, mouse or focus. See "Docker mode" below.
 - `runIde --docker --split PROJECT ...` — Remote Development split mode: backend on PROJECT plus the bundled JetBrains Client, driven through the client. See "Split mode" above.
-- `stopIde` — kill registered IDE + clean sandbox (in Docker mode also removes the container).
+- `runIde --instance NAME [--restart] [--port N] ...` — register the IDE as NAME (see "Several IDEs at once"); `--restart` stops a running NAME first instead of failing; the port defaults to the first free one from 8082.
+- `stopIde [--all]` — kill the selected IDE + clean its sandbox (in Docker mode also removes its container). `--all`: every registered IDE.
+- `instances` — list registered IDEs: name, port, `up`/`starting`/`dead`, container (or `host`), sandbox.
 - `probe` — one `callJs("true")` round-trip; quick health check.
+- `ideCache [--keep N]` — list the Linux IDEs cached for `--docker` (size, last use, path), most recently used first. `--keep N` deletes all but the N most recently used, plus leftover archives, unfinished unpacks and sandboxes; refuses while an IDE runs.
 
 **Generic**
 - `getStateSummary` — **default observation command.** Prints the focus summary then a compact list of every interactive element (buttons, fields, checkboxes, menus, lists, trees, dialogs) with ready-to-use xpaths. Use this after every state-changing action. Pipe through `grep` to narrow further. Falls back to `getState` when you need the raw tree.
@@ -334,8 +355,8 @@ Any script valid as a `RemoteRobot.callJs` body works — full Java reflection i
 - **`Current window: <none>` means focus loss — act on it immediately.** If `getState` reports `Current window: <none>`, the IDE window is unfocused (a native dialog, OS event, or prior action stole it). Any keyboard or click action you send next will silently go nowhere. **Stop, call `focusWindow` (optionally `--title <substring>` to target a specific window), then call `getState` again to confirm focus is restored before continuing.** Do not skip this step and do not assume the next action will work anyway.
 - **Multiple matches.** `clickButton --text` can match several components (e.g. a `JButton` and its child `JBLabel` both carry the label text). The CLI clicks the first match and prints a warning. When the action doesn't fire, add `--xpath` with a `@class` predicate: `"//div[@accessiblename='New Project' and @class='JButton']"`.
 - **Quoting paths with spaces.** Always quote the `.app` path — it contains a space (`IntelliJ IDEA.app`).
-- **Idempotency / stale state recovery.** `runIde` refuses to start a second IDE if one is registered. If a command errors with a connection failure (`ConnectException`, socket timeout), the daemon may be dead while `state.properties` still points at it. Recover with `~/.claude/skills/idea-ui-controller/idea-ui-controller stopIde` (it tolerates a stale state) then `runIde` again.
-- **State file.** Read/write at `~/.idea-ui-controller/state.properties`. Contains `pid`, `port`, `sandbox`.
+- **Idempotency / stale state recovery.** `runIde` refuses to start an instance name that already runs (pass `--restart`). If a command errors with a connection failure (`ConnectException`, socket timeout), the daemon may be dead while its state file still points at it. Recover with `stopIde` (same `--instance`; it tolerates a stale state) then `runIde` again. Dead instances' state files are cleaned up by the next `runIde`.
+- **State files.** `~/.idea-ui-controller/instances/<instance>.properties`: `pid`, `port`, `sandbox`, `container`, `ide`.
 - **Prefer clicks and keystrokes over scripts.** When you can achieve a goal through the IDE's own UI — menu items, buttons, keyboard shortcuts, dialogs — do that instead of reaching for `callJs`/`runJs`. UI-path actions exercise the real feature surface and are more likely to catch regressions. Reserve scripts for things the UI cannot expose: reading internal state, triggering non-interactive platform APIs, or recovering from a wedged state where no UI path is available.
 - **`runJs` + EDT footgun.** Never call long-running or EDT-blocking operations directly (`ProjectUtil.openOrImport`, full project indexing triggers, modal dialogs spun on the EDT) from a `runJs` with `--edt` — they starve the robot-server and wedge the IDE. Wrap them in `ApplicationManager.getApplication().invokeLater(...)` or use a background task. `WriteAction.run(...)` inside `invokeAndWait(...)` is fine for short write-path edits (that's what `createScratchFile` / `editorInjectText` do).
 - **Do NOT `sleep`.** The CLI is synchronous — every subcommand blocks until it finishes. External waits are pure waste.
