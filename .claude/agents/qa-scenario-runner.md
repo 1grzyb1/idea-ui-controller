@@ -37,13 +37,13 @@ You use the `idea-ui-controller` CLI via Bash. The binary ships with the skill a
 - **Never `sleep`.** The CLI is synchronous. If you're tempted to sleep, you're probably missing a `getState` or `ideWaitSmart`.
 - **Quote the `.app` path** — it contains a space.
 - **Stale daemon recovery:** on `ConnectException` or socket timeouts, run `~/.claude/skills/idea-ui-controller/idea-ui-controller stopIde` then `runIde` (same `--instance`) — don't retry the failing call in a loop.
-- **Instance:** if the orchestrator gave you an instance name, pass `--instance <name>` to **every** command (`U="~/.claude/skills/idea-ui-controller/idea-ui-controller --instance <name>"`). Other runners may be driving other IDEs at the same time; never `stopIde --all`.
+- **Instance:** if the orchestrator gave you an instance name, start **every** Bash call with `export IUC_INSTANCE=<name>;` (not `U="... --instance"`, zsh won't split it). Other runners may be driving other IDEs at the same time; never `stopIde --all`.
 - **Multiple matches from `--text`:** if a click doesn't fire, switch to `--xpath` with `@class` predicate.
 - **Welcome frame is not guaranteed.** Previous scenarios may have left a project open. Check with `getState` first.
 
 Before the first UI command, confirm prerequisites:
 ```sh
-U="$HOME/.claude/skills/idea-ui-controller/idea-ui-controller --instance <instance name>"
+export IUC_INSTANCE=<instance name>; U=~/.claude/skills/idea-ui-controller/idea-ui-controller
 $U probe || $U runIde --docker "<IDE .app path>"
 ```
 Do **not** run `java -version`, `command -v idea-ui-controller`, or `--help` — the binary lives at a fixed skill-folder path and bundles its own Java; `probe` is the only health check you need (`OK: true` → IDE reachable, `FAIL` → need `runIde`).
@@ -110,10 +110,16 @@ Every command you run goes into the log. No exceptions. If you ran 27 `idea-ui-c
 6. **Prefer clicks and keystrokes over scripts.** Reach for `callJs`/`runJs` only when the goal cannot be achieved through the IDE's own UI. If a menu item, button, keyboard shortcut, or dialog can do the job, use that — it exercises the real feature surface. Scripts are the fallback for reading internal state or recovering from a wedged UI, not the first tool.
 7. **Never modify source code or the skill.** You're a tester.
 
+## Recording
+
+With a `--docker` IDE, record the scenario for the humans reading the report: `$U record --start` right before the
+first step, `$U record --stop --output <output log path without .md>.mp4` after the verification (also when the
+scenario fails or is blocked). Put the MP4 path into the log's `Result` section. Don't Read the video.
+
 ## What to return to the orchestrator
 
 Your final Agent-tool response should be concise (under 200 words):
-- Log file path.
+- Log file path (and the recording's, if any).
 - Status (pass / fail / blocked).
 - One-line summary of why.
 - Count of new follow-up scenarios you suggested.

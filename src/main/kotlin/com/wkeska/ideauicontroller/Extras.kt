@@ -777,3 +777,89 @@ class IdeLogCommand : Callable<Int> {
         return 0
     }
 }
+
+// ---------- Live view and recording (Docker) ----------
+
+@Command(name = "view", description = ["Print the URL of the IDE's live view (noVNC): open it in a browser to watch the IDE."])
+class ViewCommand : Callable<Int> {
+    override fun call(): Int {
+        val state = requireRunningState()
+        val port = state.viewPort ?: error(
+            if (state.container == null) "A host IDE has no live view: it's on your screen" else "Started with --no-view",
+        )
+        println(DockerIdeLauncher.viewUrl(port))
+        return 0
+    }
+}
+
+private const val RECORDING_PID = "/tmp/iuc-recording.pid"
+private const val RECORDING_FILE = "/tmp/iuc-recording.path"
+
+@Command(
+    name = "record",
+    description = [
+        "Record the IDE's screen to an MP4 (Docker only): --start, act, --stop [--output FILE]. Prints the file path.",
+        "Recordings go to ~/.idea-ui-controller/recordings unless --output says otherwise; stopIde finishes a running one.",
+    ],
+)
+class RecordCommand : Callable<Int> {
+    @Option(names = ["--start"]) var start: Boolean = false
+    @Option(names = ["--stop"]) var stop: Boolean = false
+    @Option(names = ["--output", "-o"], description = ["With --stop: move the recording here."]) var output: Path? = null
+    @Option(names = ["--fps"], description = ["Frames per second (default 10)."]) var fps: Int = 10
+    @Option(names = ["--width"], description = ["Video width in pixels, height keeps the aspect ratio (default 1280)."]) var width: Int = 1280
+
+    override fun call(): Int {
+        require(start != stop) { "Pass --start or --stop" }
+        val state = requireRunningState()
+        val container = state.container ?: error("record works only for a --docker IDE")
+        if (start) {
+            val file = DockerIdeLauncher.RECORDINGS.resolve(
+                "${state.name}-${java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))}.mp4",
+            )
+            val out = DockerIdeLauncher.exec(
+                container,
+                """
+                if [ -s $RECORDING_PID ] && kill -0 "${'$'}(cat $RECORDING_PID)" 2>/dev/null; then echo "RUNNING ${'$'}(cat $RECORDING_FILE)"; exit 0; fi
+                nohup ffmpeg -nostdin -loglevel error -f x11grab -framerate $fps -i :99 -vf scale=$width:-2 \
+                    -c:v libx264 -preset ultrafast -crf 30 -pix_fmt yuv420p -movflags +faststart -y '$file' \
+                    >/tmp/iuc-recording.log 2>&1 &
+                echo ${'$'}! > $RECORDING_PID
+                echo '$file' > $RECORDING_FILE
+                sleep 0.5
+                kill -0 "${'$'}(cat $RECORDING_PID)" 2>/dev/null || { cat /tmp/iuc-recording.log; exit 1; }
+                echo STARTED
+                """.trimIndent(),
+            ).trim()
+            if (out.startsWith("RUNNING")) {
+                System.err.println("Already recording to ${out.removePrefix("RUNNING ")}")
+                return 1
+            }
+            println("Recording to $file")
+            return 0
+        }
+        val file = stopRecording(state) ?: error("Not recording")
+        val target = output?.toAbsolutePath()?.also {
+            Files.createDirectories(it.parent)
+            Files.move(file, it, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        } ?: file
+        println("$target (${Files.size(target) / 1024} KB)")
+        return 0
+    }
+}
+
+/** Stops [state]'s recording so ffmpeg writes the MP4 index; returns the file, `null` when nothing records. */
+internal fun stopRecording(state: State): Path? {
+    val out = DockerIdeLauncher.exec(
+        state.container!!,
+        """
+        [ -s $RECORDING_PID ] || exit 0
+        pid=${'$'}(cat $RECORDING_PID)
+        kill -INT "${'$'}pid" 2>/dev/null
+        i=0; while kill -0 "${'$'}pid" 2>/dev/null && [ ${'$'}i -lt 100 ]; do sleep 0.1; i=${'$'}((i + 1)); done
+        rm -f $RECORDING_PID
+        cat $RECORDING_FILE
+        """.trimIndent(),
+    ).trim()
+    return out.takeIf { it.isNotEmpty() }?.let { Path.of(it) }
+}

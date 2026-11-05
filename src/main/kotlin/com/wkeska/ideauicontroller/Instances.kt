@@ -29,7 +29,7 @@ internal object SelectedInstance {
  * One registered IDE. Several run side by side, each with its own state file, port, sandbox and (in Docker mode)
  * container. [pid] is the `runIde` CLI itself while the IDE starts, so the name and port stay reserved meanwhile.
  * [container] is the Docker container the IDE runs in, `null` when it runs directly on the host. [ide] is the IDE
- * directory, so the Linux IDE cache doesn't evict it while it runs.
+ * directory, so the Linux IDE cache doesn't evict it while it runs. [viewPort] serves the live view (Docker only).
  */
 internal data class State(
     val name: String,
@@ -38,6 +38,7 @@ internal data class State(
     val sandbox: Path,
     val container: String? = null,
     val ide: Path? = null,
+    val viewPort: Int? = null,
 ) {
     val file: Path get() = fileOf(name)
 
@@ -49,6 +50,7 @@ internal data class State(
             setProperty("sandbox", sandbox.absolutePathString())
             container?.let { setProperty("container", it) }
             ide?.let { setProperty("ide", it.absolutePathString()) }
+            viewPort?.let { setProperty("viewPort", it.toString()) }
         }
         // Atomically: other CLI processes read state files at any time
         val tmp = Files.createTempFile(INSTANCES_DIR, ".$name", ".tmp")
@@ -74,6 +76,7 @@ internal data class State(
                 sandbox = Path.of(props.getProperty("sandbox")),
                 container = props.getProperty("container"),
                 ide = props.getProperty("ide")?.let(Path::of),
+                viewPort = props.getProperty("viewPort")?.toIntOrNull(),
             )
         }
 

@@ -148,6 +148,9 @@ idea-ui-controller stopIde
 | `runIde --docker [--mount DIR]... <path>` | Run the Linux build of the IDE in Docker on Xvfb, so the host keyboard and mouse stay free. `--mount` shares a host directory (e.g. a test project) at the same path |
 | `stopIde` | Kill registered IDE and clean up sandbox (and the container in Docker mode) |
 | `probe` | Quick health check — `OK: true` means IDE is reachable |
+| `instances` | List the running IDEs (several run side by side with `--instance NAME`) |
+| `view` | Live-view URL of a Docker IDE (noVNC, open it in a browser) |
+| `record --start` / `--stop [--output F.mp4]` | Record a Docker IDE's screen to MP4 |
 
 ### Observation
 | Command | Description |

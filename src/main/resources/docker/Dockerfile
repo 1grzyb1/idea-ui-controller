@@ -1,4 +1,5 @@
 # Runtime for a Linux IntelliJ-based IDE on a virtual X display (Xvfb). The IDE itself is mounted, not baked in.
+# x11vnc + noVNC show the display in a browser (VIEW_PORT), ffmpeg records it (`record`).
 FROM ubuntu:24.04
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -9,6 +10,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
         libdrm2 libxcomposite1 libxdamage1 libxfixes3 libpango-1.0-0 libcairo2 \
         git ca-certificates procps \
         libicu74 libssl3t64 zlib1g \
+        x11vnc novnc websockify ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /entrypoint.sh

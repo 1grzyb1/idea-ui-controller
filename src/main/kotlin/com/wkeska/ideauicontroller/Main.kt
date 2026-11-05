@@ -117,6 +117,8 @@ internal fun zipPluginDirectory(sourceDir: Path, destZip: Path) {
         JbaLoginCommand::class,
         IdeCacheCommand::class,
         InstancesCommand::class,
+        ViewCommand::class,
+        RecordCommand::class,
         EditorStateCommand::class,
         OpenProjectCommand::class,
         OpenFileCommand::class,
@@ -205,6 +207,12 @@ class RunIdeCommand : Callable<Int> {
     @Option(names = ["--restart"], description = ["Stop the IDE registered under this instance name first (instead of failing when it runs)."])
     var restart: Boolean = false
 
+    @Option(names = ["--no-view"], description = ["With --docker: no live view of the display (noVNC in a browser)."])
+    var noView: Boolean = false
+
+    @Option(names = ["--view-control"], description = ["With --docker: the live view also takes mouse and keyboard (default: watch only)."])
+    var viewControl: Boolean = false
+
     override fun call(): Int {
         val idePath = Path.of(ide)
         val buildSpec = !Files.exists(idePath) && DockerIdeLauncher.BUILD_SPEC.matches(ide)
@@ -237,9 +245,10 @@ class RunIdeCommand : Callable<Int> {
                     return 1
                 }
             }
-            val taken = State.all().map { it.port }.toSet()
+            val taken = State.all().flatMap { listOfNotNull(it.port, it.viewPort) }.toSet()
             val port = requestedPort?.also { p -> require(p !in taken) { "Port $p is used by another instance" } }
                 ?: (8082..8182).first { it !in taken && isPortFree(it) }
+            val viewPort = if (docker && !noView) (6080..6180).first { it !in taken && isPortFree(it) } else null
             val sandbox = if (docker) {
                 // Leftovers of IDEs that crashed or weren't stopped; never another instance's
                 val used = State.all().map { it.sandbox.toAbsolutePath().normalize() }.toSet()
@@ -249,7 +258,7 @@ class RunIdeCommand : Callable<Int> {
             } else {
                 Files.createTempDirectory("idea-ui-controller-sandbox")
             }
-            State(name, ProcessHandle.current().pid(), port, sandbox, container(name)).also { it.save() }
+            State(name, ProcessHandle.current().pid(), port, sandbox, container(name), viewPort = viewPort).also { it.save() }
         }
         try {
             return launch(reserved, buildSpec, idePath)
@@ -289,6 +298,7 @@ class RunIdeCommand : Callable<Int> {
         val ideProperties = mapOf("robot-server.port" to port, "idea.trust.all.projects" to true)
         val process = if (docker) {
             val container = reserved.container!!
+            val view = reserved.viewPort?.let { DockerIdeLauncher.View(it, viewControl) }
             println("[3/4] Launching IDE in Docker container '$container' ...")
             // Resolved and registered under the cache lock, so no parallel eviction deletes it in between
             val linuxIde = DockerIdeLauncher.withCacheLock {
@@ -312,6 +322,7 @@ class RunIdeCommand : Callable<Int> {
                     port = port,
                     mounts = mounts,
                     container = container,
+                    view = view,
                 )
             } else DockerIdeLauncher.launch(
                 ide = linuxIde,
@@ -321,6 +332,7 @@ class RunIdeCommand : Callable<Int> {
                 port = port,
                 mounts = mounts,
                 container = container,
+                view = view,
             )
         } else {
             println("[3/4] Launching IDE process ...")
@@ -368,6 +380,7 @@ class RunIdeCommand : Callable<Int> {
         val elapsed = (System.currentTimeMillis() - startMs) / 1_000
         State.load(name)!!.copy(pid = process.pid()).save()
         println("      [${elapsed}s] Robot-server is UP.")
+        reserved.viewPort?.let { println("Live view${if (viewControl) "" else " (watch only)"}: ${DockerIdeLauncher.viewUrl(it)}") }
         println("Instance '$name' registered. When several IDEs run, pass --instance $name to every command.")
         return 0
     }
@@ -390,6 +403,8 @@ private fun isPortFree(port: Int): Boolean = try {
 
 /** Stops the IDE of [state], deletes its sandbox and its state file. */
 internal fun stopInstance(state: State) {
+    // A running recording would lose its index when the container goes
+    if (state.container != null) runCatching { stopRecording(state) }
     runCatching {
         RemoteRobot("http://127.0.0.1:${state.port}", OkHttpClient())
             .runJs("com.intellij.openapi.application.ApplicationManager.getApplication().exit(true, true);", false)
@@ -433,7 +448,8 @@ class InstancesCommand : Callable<Int> {
         if (states.isEmpty()) println("No IDE registered.")
         for (s in states) {
             val status = if (s.isAlive()) "up" else if (s.isLive()) "starting" else "dead"
-            println("${s.name}\tport=${s.port}\t$status\t${s.container ?: "host"}\t${s.sandbox}")
+            val view = s.viewPort?.let { "\t" + DockerIdeLauncher.viewUrl(it) } ?: ""
+            println("${s.name}\tport=${s.port}\t$status\t${s.container ?: "host"}\t${s.sandbox}$view")
         }
         return 0
     }

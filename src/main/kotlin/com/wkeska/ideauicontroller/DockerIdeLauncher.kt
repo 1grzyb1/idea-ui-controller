@@ -61,6 +61,7 @@ internal object DockerIdeLauncher {
         port: Int,
         mounts: List<Path>,
         container: String,
+        view: View?,
     ): Process {
         val prepared = DetachedIdeLauncher.prepare(
             ide, Os.LINUX, sandbox, plugins,
@@ -71,14 +72,7 @@ internal object DockerIdeLauncher {
         buildImage()
         remove(container)
 
-        val command = mutableListOf(
-            docker.absolutePathString(), "run", "--rm", "--name", container,
-            "--shm-size", "1g",
-            "-p", "127.0.0.1:$port:$port",
-            "-e", "LANG=C.UTF-8",
-            "-v", "${ide.absolutePathString()}:${ide.absolutePathString()}:ro",
-            "-v", "${sandbox.absolutePathString()}:${sandbox.absolutePathString()}",
-        )
+        val command = runCommand(container, "1g", port, ide, sandbox, view)
         for (mount in mounts) {
             val path = mount.toAbsolutePath().normalize()
             Files.createDirectories(path)
@@ -109,6 +103,7 @@ internal object DockerIdeLauncher {
         port: Int,
         mounts: List<Path>,
         container: String,
+        view: View?,
     ): Process {
         val backendSandbox = sandbox.resolve("backend")
         val backend = DetachedIdeLauncher.prepare(
@@ -131,14 +126,7 @@ internal object DockerIdeLauncher {
         buildImage()
         remove(container)
 
-        val command = mutableListOf(
-            docker.absolutePathString(), "run", "--rm", "--name", container,
-            "--shm-size", "2g",
-            "-p", "127.0.0.1:$port:$port",
-            "-e", "LANG=C.UTF-8",
-            "-v", "${ide.absolutePathString()}:${ide.absolutePathString()}:ro",
-            "-v", "${sandbox.absolutePathString()}:${sandbox.absolutePathString()}",
-        )
+        val command = runCommand(container, "2g", port, ide, sandbox, view)
         // A project can be a file, e.g. Rider's .sln
         val projectDir = if (Files.isRegularFile(project)) project.toAbsolutePath().parent else project
         for (mount in (mounts + listOf(projectDir)).distinctBy { it.toAbsolutePath().normalize() }) {
@@ -162,6 +150,36 @@ internal object DockerIdeLauncher {
             .redirectOutput(DetachedIdeLauncher.outputLogOf(sandbox).toFile())
             .start()
     }
+
+    /** The live view of the display: noVNC on [port], read-only unless [control]. */
+    data class View(val port: Int, val control: Boolean)
+
+    fun viewUrl(port: Int): String = "http://127.0.0.1:$port/vnc.html?autoconnect=true&resize=scale&reconnect=true"
+
+    /** Recordings outlive the sandbox (stopIde deletes it), so they go to a directory every container mounts. */
+    val RECORDINGS: Path = HOME.resolve("recordings")
+
+    private fun runCommand(container: String, shm: String, port: Int, ide: Path, sandbox: Path, view: View?): MutableList<String> {
+        Files.createDirectories(RECORDINGS)
+        val command = mutableListOf(
+            // --init: an init process reaps orphans, e.g. a stopped recording's ffmpeg
+            docker.absolutePathString(), "run", "--rm", "--init", "--name", container,
+            "--shm-size", shm,
+            "-p", "127.0.0.1:$port:$port",
+            "-e", "LANG=C.UTF-8",
+            "-v", "${ide.absolutePathString()}:${ide.absolutePathString()}:ro",
+            "-v", "${sandbox.absolutePathString()}:${sandbox.absolutePathString()}",
+            "-v", "${RECORDINGS.absolutePathString()}:${RECORDINGS.absolutePathString()}",
+        )
+        if (view != null) {
+            command += listOf("-p", "127.0.0.1:${view.port}:${view.port}", "-e", "VIEW_PORT=${view.port}")
+            if (!view.control) command += listOf("-e", "VIEW_ONLY=1")
+        }
+        return command
+    }
+
+    /** Runs [script] with `sh -c` in [container] and returns its output; fails on a non-zero exit. */
+    fun exec(container: String, script: String): String = run(listOf(docker.absolutePathString(), "exec", container, "sh", "-c", script))
 
     /** Force-removes [container]; a no-op when it doesn't exist. */
     fun remove(container: String) {

@@ -55,8 +55,9 @@ Several agents can each drive their own IDE at the same time. Every IDE is a nam
 sandbox and (with `--docker`) container `idea-ui-controller-<name>`.
 
 - **When other agents may be running IDEs too, always pass `--instance <unique name>`** (e.g. your scenario slug) to
-  `runIde` **and to every later command**, before or after the subcommand: `$U --instance vim-undo editorState`. Or
-  set `IUC_INSTANCE=vim-undo` in the same shell command. Easiest: `U="$HOME/.claude/skills/idea-ui-controller/idea-ui-controller --instance vim-undo"`.
+  `runIde` **and to every later command**, before or after the subcommand: `$U --instance vim-undo editorState`.
+  Easiest: start every Bash call with `export IUC_INSTANCE=vim-undo;` (the shell doesn't keep it between calls).
+  Don't put `--instance` into `U="..."`: zsh doesn't split a variable into words, so `$U` then is no command.
 - Without `--instance`, `runIde` names it `default` (or `ide2`, `ide3`… if taken) and picks the first free port from 8082;
   other commands use the only running IDE and fail with "2 IDEs are running (a, b): pass --instance" when there are more.
   So a command never silently drives someone else's IDE.
@@ -102,6 +103,18 @@ unchanged over `127.0.0.1:<port>`.
 - `screenshot` shows the 1920x1080 virtual screen. `idea.log` is in `<sandbox>/log*/idea.log` as usual; the IDE's raw
   output (`<sandbox>/ide-output.log`) is the container output.
 
+### Watching and recording a Docker IDE
+
+- **Live view:** `runIde --docker` prints `Live view (watch only): http://127.0.0.1:<port>/vnc.html?...` (also `view`,
+  `instances`). It's noVNC: the virtual screen in a browser, live. Give the URL to the user when they want to watch —
+  T3 Code can open it in its browser tab. Watch only by default, so a stray click doesn't break your run;
+  `runIde --view-control` lets the viewer use mouse and keyboard, `--no-view` turns it off.
+- **Recording:** `record --start`, do the steps, `record --stop --output <file>.mp4` (prints the path and size). 1280 px
+  wide, 10 fps, ~5–50 KB per second of mostly static IDE; `--fps`, `--width`. Without `--output` it stays in
+  `~/.idea-ui-controller/recordings/`. `stopIde` finishes a running recording. Use it to show the user what happened
+  (a repro, a QA scenario) — it costs you no tokens, unlike screenshots you read. Embed it in your final reply
+  as `![what it shows](/abs/path.mp4)` (T3 Code plays it) or give the path.
+
 ## Split mode (`runIde --docker --split PROJECT`)
 
 Remote Development split mode in one container: the IDE runs as a backend (`bin/<ide>.sh serverMode PROJECT`), and the
@@ -144,6 +157,8 @@ runIde --docker --split /tmp/proj/ConsoleApp.sln --timeout-seconds 900 --plugin 
 - `stopIde [--all]` — kill the selected IDE + clean its sandbox (in Docker mode also removes its container). `--all`: every registered IDE.
 - `instances` — list registered IDEs: name, port, `up`/`starting`/`dead`, container (or `host`), sandbox.
 - `probe` — one `callJs("true")` round-trip; quick health check.
+- `view` — print the live-view URL (noVNC) of a `--docker` IDE. `runIde --view-control` makes it interactive, `--no-view` disables it.
+- `record --start` / `record --stop [--output FILE.mp4]` — record a `--docker` IDE's screen to MP4; see "Watching and recording".
 - `ideCache [--keep N]` — list the Linux IDEs cached for `--docker` (size, last use, path), most recently used first. `--keep N` deletes all but the N most recently used, plus leftover archives, unfinished unpacks and sandboxes; refuses while an IDE runs.
 
 **Generic**

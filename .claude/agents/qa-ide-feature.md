@@ -102,7 +102,11 @@ Do not run scenarios in parallel. Each must see the state the previous one left 
 
 ## Phase 4 — Report
 
-Write `report.md`. Structure:
+Write `report.md`. Link each scenario's recording (`<scenario log>.mp4`) where the runner made one. When the IDE runs in
+Docker, tell the user its live-view URL (`idea-ui-controller --instance <slug> view`) once at the start of Phase 3, so
+they can watch. In your final reply, embed the recordings of failed scenarios as `![<scenario>](/abs/path.mp4)`.
+
+Structure:
 
 ```markdown
 # QA report — <feature>

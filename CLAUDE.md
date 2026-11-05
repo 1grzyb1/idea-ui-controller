@@ -31,7 +31,7 @@ This project has three tightly coupled pieces. A change to the CLI API (new subc
 - `Main.kt` — daemon lifecycle (`runIde`, `stopIde`, `getState`, `probe`, `focusWindow`), generic actions (`clickButton`, `runJs`, `callJs`), and keyboard primitives (`sendKey`, `typeText`).
 - `DetachedIdeLauncher.kt` / `DockerIdeLauncher.kt` — start the IDE on the host, or its Linux build in Docker on Xvfb (`runIde --docker`; image sources in `src/main/resources/docker/`).
 - `Pages.kt` — page-scoped commands: Welcome frame, Editor, IDE frame, Dialog, Search Everywhere, Action Menu, Gutter, generic widgets (`listSelect`, `textFieldSet`, `checkboxSet`, `dialogClickButton`), and high-level flows (`projectCreateFromDialog`, `createScratchFile`).
-- `Extras.kt` — the `runJs`/`callJs` script prelude (`loadPluginClass`, `pluginClass`, `normText`, `focusOwner`, `onEdt`), HTML-entity decoding for xpaths and texts, `linkClick`, `clipboard`, `focusedComponent`, `traceActions`, `jbaLogin`.
+- `Extras.kt` — the `runJs`/`callJs` script prelude (`loadPluginClass`, `pluginClass`, `normText`, `focusOwner`, `onEdt`), HTML-entity decoding for xpaths and texts, `linkClick`, `clipboard`, `focusedComponent`, `traceActions`, `jbaLogin`, and for Docker IDEs `view` (noVNC live view, served from the container by `entrypoint.sh`) and `record` (ffmpeg in the container).
 
 **Underlying library:** JetBrains [`intellij-ui-test-robot`](https://github.com/JetBrains/intellij-ui-test-robot) (NOT Robot Framework). All locator syntax (`byXpath`), fixture semantics, and `callJs`/`runJs` contracts come from there.
 
