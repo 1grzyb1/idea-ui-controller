@@ -69,7 +69,7 @@ internal object DockerIdeLauncher {
             // No update check: its balloon covers the welcome screen of an old build
             properties + mapOf("robot-server.host.public" to true, "ide.no.platform.update" to true),
         )
-        buildImage()
+        ensureImage()
         remove(container)
 
         val command = runCommand(container, "1g", port, ide, sandbox, view)
@@ -123,7 +123,7 @@ internal object DockerIdeLauncher {
         javaClass.getResourceAsStream("/docker/split.sh")!!.use { Files.copy(it, splitScript, StandardCopyOption.REPLACE_EXISTING) }
         splitScript.toFile().setExecutable(true)
 
-        buildImage()
+        ensureImage()
         remove(container)
 
         val command = runCommand(container, "2g", port, ide, sandbox, view)
@@ -314,6 +314,14 @@ internal object DockerIdeLauncher {
                 tar.outputStream.use { response.body!!.byteStream().copyTo(it) }
             }
         check(tar.waitFor() == 0) { "Unpacking $url failed" }
+    }
+
+    // Once per process; a second caller waits for the first, a failure is retried
+    private val image = lazy { buildImage() }
+
+    /** Builds the runtime image unless this process already did; `runIde` starts it while the IDE downloads. */
+    fun ensureImage() {
+        image.value
     }
 
     /** Builds the Xvfb runtime image from the Dockerfile bundled in the CLI; Docker's layer cache makes repeats instant. */

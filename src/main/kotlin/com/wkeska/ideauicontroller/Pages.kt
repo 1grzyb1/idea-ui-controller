@@ -785,9 +785,14 @@ class CheckboxSetCommand : Callable<Int> {
             xp("//div[(@text='$text' or @accessiblename='$text') and (@class='JCheckBox' or @class='JBCheckBox')]"),
             Duration.ofSeconds(timeoutSeconds),
         )
-        val current = r.callJs<Boolean>(cb, "component.isSelected()", true)
-        if (current != checked) cb.click()
-        return 0
+        if (r.callJs<Boolean>(cb, "component.isSelected()", true) != checked) cb.click()
+        // A mouse click misses a checkbox scrolled out of view or covered by a tooltip; doClick fires the same listeners
+        if (r.callJs<Boolean>(cb, "component.isSelected()", true) != checked) {
+            r.callJs<Boolean>(cb, "component.doClick(); true", true)
+        }
+        val now = r.callJs<Boolean>(cb, "component.isSelected()", true)
+        println(if (now) "checked" else "unchecked")
+        return if (now == checked) 0 else 1
     }
 }
 
@@ -815,6 +820,17 @@ class DialogClickButtonCommand : Callable<Int> {
 
 // ---------- Keyboard primitives (focused window) ----------
 
+// After a dialog closes the IDE can be left with no focus owner (no window manager on Xvfb): keys then go nowhere
+// and the command still "succeeds". Say so instead of letting the agent retry the same keys.
+private fun RemoteRobot.warnIfNoFocus() {
+    val none = runCatching {
+        callJs<Boolean>("java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner() === null", true)
+    }.getOrDefault(false)
+    if (none) {
+        System.err.println("warning: nothing in the IDE has keyboard focus, so keys go nowhere. openFile, focusWindow or a click on the target first.")
+    }
+}
+
 @Command(
     name = "sendKey",
     description = [
@@ -840,6 +856,7 @@ class SendKeyCommand : Callable<Int> {
             error("Unknown key '$key'. Use a VK_* constant name without the VK_ prefix, e.g. ESCAPE, ENTER, F1.")
         }
         val r = connect()
+        r.warnIfNoFocus()
         r.runJs(
             """
             for (var i = 0; i < $count; i++) {
@@ -896,6 +913,7 @@ class TypeTextCommand : Callable<Int> {
         // The robot-server handles one request at a time: a request still typing after the client gave up keeps
         // typing and every later command waits behind it. Keep each request to a few seconds.
         val chunkSize = (3_000 / (delayMs + 10)).toInt().coerceIn(1, 200)
+        r.warnIfNoFocus()
         for (chunk in resolved.chunked(chunkSize)) {
             r.runJs(
                 """
@@ -978,6 +996,7 @@ class SendKeyComboCommand : Callable<Int> {
         val press = modVks.joinToString("\n") { "robot.pressKey($it);" }
         val release = modVks.reversed().joinToString("\n") { "robot.releaseKey($it);" }
         val r = connect()
+        r.warnIfNoFocus()
         r.runJs(
             """
             $press

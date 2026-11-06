@@ -23,23 +23,17 @@ If any of these are missing, stop and return an error summary saying what's miss
 
 You use the `idea-ui-controller` CLI via Bash. The binary ships with the skill at the fixed absolute path `~/.claude/skills/idea-ui-controller/idea-ui-controller` — invoke it directly, no PATH setup required. The canonical skill reference is `.claude/skills/idea-ui-controller/SKILL.md` — re-read it if you've forgotten a subcommand. Golden rules from that skill, repeated because they matter:
 
-- **`getState` after every state-changing action — but only read what you need.** UI is non-deterministic between versions and runs. Chaining actions blind is the top cause of wedged runs. Use the cheapest form that answers your question:
-  - `--no-tree`: just checking focus / current window.
-  - `| grep "..."`: looking for a specific element — only matching lines hit context.
-  - **before/after diff**: best default for verifying that an action had the intended effect. Snapshot before, act, snapshot after, diff — only changed lines reach your context:
-    ```sh
-    ~/.claude/skills/idea-ui-controller/idea-ui-controller getState > /tmp/before.xml
-    # ... your action ...
-    ~/.claude/skills/idea-ui-controller/idea-ui-controller getState > /tmp/after.xml
-    diff /tmp/before.xml /tmp/after.xml
-    ```
-  - Full unfiltered: fine to use occasionally, especially when grep isn't giving you enough context to orient yourself — just don't do it reflexively after every action.
-- **Never `sleep`.** The CLI is synchronous. If you're tempted to sleep, you're probably missing a `getState` or `ideWaitSmart`.
+- **Observe after every state-changing action — with the cheapest command that answers the question.** UI is non-deterministic between versions and runs. Chaining actions blind is the top cause of wedged runs.
+  - Editor content, caret, selection, Vim mode: `editorState`, or `--state` on the key command itself (`typeText -t dd --state`).
+  - Windows, dialogs, popups, buttons, checkboxes, list and tree rows: `getStateSummary` (`| grep "..."` to narrow). It lists only the current window and the popups on it.
+  - Verifying an action changed the UI: `getStateSummary > /tmp/before.txt`, act, `getStateSummary > /tmp/after.txt`, `diff` them.
+  - Raw `getState` (hundreds of KB): only `| grep`, and only when the summary misses a component.
+- **Never `sleep`.** The CLI is synchronous. If you're tempted to sleep, use `waitFor --text/--xpath [--gone]` or `ideWaitSmart`.
 - **Quote the `.app` path** — it contains a space.
 - **Stale daemon recovery:** on `ConnectException` or socket timeouts, run `~/.claude/skills/idea-ui-controller/idea-ui-controller stopIde` then `runIde` (same `--instance`) — don't retry the failing call in a loop.
 - **Instance:** if the orchestrator gave you an instance name, start **every** Bash call with `export IUC_INSTANCE=<name>;` (not `U="... --instance"`, zsh won't split it). Other runners may be driving other IDEs at the same time; never `stopIde --all`.
 - **Multiple matches from `--text`:** if a click doesn't fire, switch to `--xpath` with `@class` predicate.
-- **Welcome frame is not guaranteed.** Previous scenarios may have left a project open. Check with `getState` first.
+- **Welcome frame is not guaranteed.** Previous scenarios may have left a project open. Check with `getStateSummary` first; open projects with `openProject PATH --file F`.
 
 Before the first UI command, confirm prerequisites:
 ```sh

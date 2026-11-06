@@ -37,7 +37,10 @@ internal fun requireRunningState(): State {
     return s
 }
 
-internal fun connect(): RemoteRobot = robot(requireRunningState())
+internal fun connect(): RemoteRobot = requireRunningState().let { state ->
+    trainAotCacheInBackground(state)
+    robot(state)
+}
 
 internal fun zipPluginDirectory(sourceDir: Path, destZip: Path) {
     val top = sourceDir.fileName.toString()
@@ -64,6 +67,7 @@ internal fun zipPluginDirectory(sourceDir: Path, destZip: Path) {
         StopIdeCommand::class,
         GetStateCommand::class,
         GetStateSummaryCommand::class,
+        AotTrainingCommand::class,
         ScreenshotCommand::class,
         ParseScreenshotCommand::class,
         ClickAtCommand::class,
@@ -294,12 +298,19 @@ class RunIdeCommand : Callable<Int> {
             }
         }
 
-        // No "Trust project" dialog when an agent opens a project
-        val ideProperties = mapOf("robot-server.port" to port, "idea.trust.all.projects" to true)
+        // No "Trust project" dialog when an agent opens a project, no "Unable to identify where Robot server was
+        // installed from" notification (the registry key reads system properties)
+        val ideProperties = mapOf(
+            "robot-server.port" to port,
+            "idea.trust.all.projects" to true,
+            "platform.enable.plugin.update.source.feature" to false,
+        )
         val process = if (docker) {
             val container = reserved.container!!
             val view = reserved.viewPort?.let { DockerIdeLauncher.View(it, viewControl) }
             println("[3/4] Launching IDE in Docker container '$container' ...")
+            // The first image build takes minutes, as does the first download of an IDE: do both at once
+            kotlin.concurrent.thread(isDaemon = true) { runCatching { DockerIdeLauncher.ensureImage() } }
             // Resolved and registered under the cache lock, so no parallel eviction deletes it in between
             val linuxIde = DockerIdeLauncher.withCacheLock {
                 val resolved = if (buildSpec) DockerIdeLauncher.resolveBuildSpec(ide, http)
@@ -544,88 +555,228 @@ class GetStateCommand : Callable<Int> {
     }
 }
 
-// Converts the raw component tree (~10 000 lines of XML) into a compact, structured element
-// list (~15 lines) with ready-to-use xpaths. Keeps agent context consumption minimal and
-// enables tight observe-act loops without raw tree parsing.
+// Walks the Swing hierarchy inside the IDE (one callJs) instead of parsing the raw component tree (~400 KB on
+// Settings): real instanceof checks, real checkbox state, rows of lists and trees, and only the windows on top.
+internal fun stateSummaryJs(allWindows: Boolean, maxRows: Int) = """
+    importClass(java.awt.Window);
+    importClass(java.awt.Frame);
+    importClass(java.awt.Dialog);
+    importClass(java.awt.Container);
+    importClass(java.awt.KeyboardFocusManager);
+    importClass(javax.swing.AbstractButton);
+    importClass(javax.swing.JToggleButton);
+    importClass(javax.swing.JLabel);
+    importClass(javax.swing.JList);
+    importClass(javax.swing.JTree);
+    importClass(javax.swing.JTable);
+    importClass(javax.swing.JComboBox);
+    importClass(javax.swing.JPasswordField);
+    importClass(javax.swing.text.JTextComponent);
+    var ALL_WINDOWS = $allWindows, MAX_ROWS = $maxRows;
+    var listReader = new com.intellij.remoterobot.fixtures.dataExtractor.server.textCellRenderers.JListTextCellReader();
+    var treeReader = new com.intellij.remoterobot.fixtures.dataExtractor.server.textCellRenderers.JTreeTextCellReader();
+    var comboList = new JList();
+    var focusOwner = KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner();
+
+    function str(v) { return v === null || v === undefined ? "" : String(v); }
+    function plain(v) {
+        return str(v).replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">").replace(/\s+/g, " ").trim();
+    }
+    function cut(v, n) { return v.length > n ? v.substring(0, n - 1) + "\u2026" : v; }
+    function q(v) { return v.replace(/'/g, "\\'"); }
+    function windowName(w) {
+        var t = (w instanceof Frame || w instanceof Dialog) ? plain(w.getTitle()) : "";
+        return (t.length > 0 ? "'" + t + "' " : "") + "(" + w.getClass().getSimpleName() + ")";
+    }
+    function supers(c) {
+        var s = {};
+        for (var k = c.getClass(); k !== null; k = k.getSuperclass()) s[String(k.getSimpleName())] = true;
+        return s;
+    }
+    // The robot-server's @class: the first named class up the hierarchy (anonymous subclasses have no simple name)
+    function clsName(c) {
+        for (var k = c.getClass(); k !== null; k = k.getSuperclass()) if (String(k.getSimpleName()).length > 0) return String(k.getSimpleName());
+        return "";
+    }
+    // Long values are matched by a prefix, so the xpath stays short
+    function attr(name, v) {
+        return v.length > 60 ? "contains(@" + name + ", '" + q(v.substring(0, 40)) + "')" : "@" + name + "='" + q(v) + "'";
+    }
+    function accName(c) { try { return plain(c.getAccessibleContext().getAccessibleName()); } catch (e) { return ""; } }
+    function safe(f) { try { return f(); } catch (e) { return ""; } }
+    // A row as a screen reader reads it: the renderer's accessible name, else the texts it paints, in order
+    function rendererText(r) {
+        var an = accName(r);
+        if (an.length > 0) return an;
+        var parts = [];
+        (function collect(c) {
+            var t = c instanceof JLabel ? plain(c.getText())
+                : supers(c).SimpleColoredComponent ? plain(safe(function () { return c.getCharSequence(false); })) : "";
+            if (t.length > 0) parts.push(t);
+            if (c instanceof Container) { var k = c.getComponents(); for (var i = 0; i < k.length; i++) collect(k[i]); }
+        })(r);
+        return parts.join("  ");
+    }
+
+    var lines = [], xpaths = {};
+    function emit(c, label, flags, rows) {
+        var cls = clsName(c);
+        var an = accName(c);
+        var xpath = an.length > 0 ? "//div[" + attr("accessiblename", an) + " and @class='" + cls + "']"
+            : label.length > 0 ? "//div[" + attr("text", label) + " and @class='" + cls + "']"
+            : "//div[@class='" + cls + "']";
+        if (!c.isEnabled()) flags.unshift("disabled");
+        if (focusOwner !== null && (c === focusOwner || c.isAncestorOf(focusOwner))) flags.push("focused");
+        xpaths[xpath] = (xpaths[xpath] || 0) + 1;
+        lines.push({cls: cls, label: label.length > 0 ? label : an, xpath: xpath, flags: flags, rows: rows || []});
+    }
+    function listRows(list) {
+        var rows = [], n = list.getModel().getSize();
+        if (n === 0) return rows;
+        var first = Math.max(list.getFirstVisibleIndex(), 0), last = list.getLastVisibleIndex();
+        if (last < 0) last = n - 1;
+        var from = Math.max(0, Math.min(first, list.getSelectedIndex() >= 0 ? list.getSelectedIndex() : first));
+        for (var i = from; i <= last && rows.length < MAX_ROWS; i++) {
+            var text = safe(function () {
+                var r = list.getCellRenderer().getListCellRendererComponent(list, list.getModel().getElementAt(i), i, list.isSelectedIndex(i), false);
+                return rendererText(r);
+            }) || safe(function () { return plain(listReader.valueAt(list, i)); });
+            rows.push((list.isSelectedIndex(i) ? "> " : "  ") + i + ": " + cut(text, 100));
+        }
+        if (from > 0 || from + rows.length < n) rows.push("  (" + n + " rows, from " + from + ")");
+        return rows;
+    }
+    function treeRows(tree) {
+        var rows = [], n = tree.getRowCount();
+        var r = tree.getVisibleRect(), first = Math.max(tree.getClosestRowForLocation(0, r.y), 0);
+        var sel = tree.getMinSelectionRow();
+        if (sel >= 0 && (sel < first || sel >= first + MAX_ROWS)) first = Math.max(0, sel - 2);
+        for (var i = first; i < n && rows.length < MAX_ROWS; i++) {
+            var path = tree.getPathForRow(i);
+            if (path === null) continue;
+            var depth = path.getPathCount() - (tree.isRootVisible() ? 1 : 2);
+            var node = path.getLastPathComponent();
+            var text = safe(function () {
+                var r = tree.getCellRenderer().getTreeCellRendererComponent(tree, node, tree.isRowSelected(i), tree.isExpanded(i),
+                    tree.getModel().isLeaf(node), i, false);
+                return rendererText(r);
+            }) || safe(function () { return plain(treeReader.valueAt(tree, node)); });
+            var mark = tree.getModel().isLeaf(path.getLastPathComponent()) ? "  " : (tree.isExpanded(i) ? "v " : "> ");
+            rows.push((tree.isRowSelected(i) ? "* " : "  ") + new Array(depth + 1).join("  ") + mark + cut(text, 100));
+        }
+        if (first > 0 || first + rows.length < n) rows.push("  (" + n + " rows, from " + first + ")");
+        return rows;
+    }
+    function visit(c) {
+        if (!c.isShowing()) return;
+        if (c instanceof JList) { emit(c, "", [], listRows(c)); return; }
+        if (c instanceof JTree) { emit(c, "", [], treeRows(c)); return; }
+        if (c instanceof JTable) { emit(c, "", [c.getRowCount() + " rows"]); return; }
+        if (c instanceof JComboBox) {
+            var item = c.getSelectedItem();
+            var shown = item === null ? "" : safe(function () {
+                return rendererText(c.getRenderer().getListCellRendererComponent(comboList, item, -1, false, false));
+            });
+            emit(c, shown || plain(str(item)), ["combo"]);
+            return;
+        }
+        if (c instanceof JTextComponent && String(c.getClass().getSimpleName()) === "EditorComponentImpl") {
+            var e = c.getEditor();
+            var file = safe(function () { return e.getVirtualFile().getName(); });
+            emit(c, file, [e.isViewer() ? "viewer" : "editor", e.getDocument().getTextLength() + " chars"]);
+            return;
+        }
+        if (c instanceof JPasswordField) { emit(c, "", ["password"]); return; }
+        if (c instanceof JTextComponent) {
+            if (c.isEditable()) {
+                emit(c, "", ["value=" + JSON.stringify(cut(str(c.getText()), 80))]);
+            } else {
+                // Read-only panes are labels and comments (DslLabel)
+                var t3 = plain(c.getText());
+                if (t3.length > 0) emit(c, t3, []);
+            }
+            return;
+        }
+        if (c instanceof AbstractButton) {
+            var flags = [];
+            if (c instanceof JToggleButton) flags.push(c.isSelected() ? "checked" : "unchecked");
+            emit(c, plain(c.getText()), flags);
+            return;
+        }
+        if (c instanceof JLabel) {
+            var t = plain(c.getText());
+            if (t.length > 0) emit(c, t, []);
+            return;
+        }
+        var s = supers(c);
+        if (s.ActionButton) {
+            emit(c, plain(safe(function () { return c.getPresentation().getText(); })), []);
+            return;
+        }
+        if (s.SimpleColoredComponent) {
+            var t2 = plain(safe(function () { return c.getCharSequence(false); }));
+            if (t2.length > 0) emit(c, t2, []);
+            return;
+        }
+        if (c instanceof Container) {
+            var kids = c.getComponents();
+            for (var i = 0; i < kids.length; i++) visit(kids[i]);
+        }
+    }
+
+    var kfm = KeyboardFocusManager.getCurrentKeyboardFocusManager();
+    var current = kfm.getFocusedWindow();
+    if (current === null) current = kfm.getActiveWindow();
+    function ownedByCurrent(w) {
+        for (var o = w.getOwner(); o !== null; o = o.getOwner()) if (o === current) return true;
+        return false;
+    }
+    var all = Window.getWindows(), shown = [], skipped = [];
+    for (var i = 0; i < all.length; i++) {
+        var w = all[i];
+        if (!w.isShowing() || w === current) continue;
+        if (ALL_WINDOWS || current === null || ownedByCurrent(w)) shown.push(w); else skipped.push(windowName(w));
+    }
+    // Popups owned by the current window are on top of it, so they go first
+    if (current !== null) shown.push(current);
+    var out = "Current window: " + (current === null ? "<none>" : windowName(current)) + "\n" +
+        "Other windows: [" + skipped.join(", ") + "]\n";
+    for (var j = 0; j < shown.length; j++) {
+        lines = [];
+        visit(shown[j]);
+        out += "--- " + windowName(shown[j]) + (current === null || shown[j] === current ? "" : " (popup)") + " ---\n";
+        if (lines.length === 0) out += "(no interactive elements)\n";
+        for (var k = 0; k < lines.length; k++) {
+            var l = lines[k];
+            if (xpaths[l.xpath] > 1) l.flags.push("x" + xpaths[l.xpath]);
+            var label = "\"" + cut(l.label, 48) + "\"";
+            var pad = function (v, n) { while (v.length < n) v += " "; return v; };
+            out += pad("[" + l.cls + "]", 28) + " " + pad(label, 50) + "  " + l.xpath +
+                (l.flags.length > 0 ? "  [" + l.flags.join(", ") + "]" : "") + "\n";
+            for (var m = 0; m < l.rows.length; m++) out += "    " + l.rows[m] + "\n";
+        }
+    }
+    out;
+"""
+
 @Command(
     name = "getStateSummary",
     description = [
-        "Print a focus summary followed by a compact list of interactive UI elements (buttons, fields, checkboxes, menus, trees, etc.).",
-        "Use this as the default post-action observation. Fall back to getState when you need the raw tree for unknown layouts.",
+        "Print the current window, then the controls of it and of the popups on top of it: buttons, fields with their",
+        "values, checkboxes with their state, the visible rows of lists and trees, editors, labels, each with an xpath.",
+        "Background windows are only named. Use this as the default post-action observation.",
     ],
 )
 class GetStateSummaryCommand : Callable<Int> {
+    @Option(names = ["--all-windows"], description = ["Also list the controls of background windows."])
+    var allWindows: Boolean = false
 
-    companion object {
-        private val ALWAYS_SHOW = setOf(
-            "JButton", "JBOptionButton", "MainButton",
-            "ActionButton",
-            "ActionMenuItem",
-            "JCheckBox", "JBCheckBox",
-            "JRadioButton",
-            "JTextField", "JBTextField", "JTextArea", "JBTextArea",
-            "EditorTextField", "BorderlessTextField", "ExtendableTextField",
-            "JComboBox",
-            "JList", "JBList",
-            "JTree",
-            "MyDialog",
-            "HeavyWeightWindow",
-        )
-        private val SHOW_IF_TEXT = setOf(
-            "ActionMenu",
-            "ActionLink",
-            "JLabel", "JBLabel",
-            "SimpleColoredComponent",
-        )
-        private val CHECKBOX_CLASSES = setOf("JCheckBox", "JBCheckBox", "JRadioButton")
-        private val ATTR = Regex("""(\w[\w-]*)="([^"]*)"""")
-    }
+    @Option(names = ["--rows"], description = ["Rows shown per list or tree (default: 15)."])
+    var rows: Int = 15
 
     override fun call(): Int {
-        val state = requireRunningState()
-        print(fetchFocusSummary(RemoteRobot("http://127.0.0.1:${state.port}", OkHttpClient())))
-
-        val body = fetchComponentTree(state.port)
-        println("--- interactive elements ---")
-        var count = 0
-        for (chunk in body.split(Regex("<div\\b")).drop(1)) {
-            val tag = chunk.substringBefore(">")
-            val attrs = ATTR.findAll(tag).associate { it.groupValues[1] to decodeHtmlEntities(it.groupValues[2]) }
-            val cls = attrs["class"] ?: continue
-            val inAlways = cls in ALWAYS_SHOW
-            val inIfText = cls in SHOW_IF_TEXT
-            if (!inAlways && !inIfText) continue
-
-            val text = attrs["text"]?.takeIf { it.isNotBlank() }
-            val accessibleName = attrs["accessiblename"]?.takeIf { it.isNotBlank() }
-            val visibleText = attrs["visible_text"]?.takeIf { it.isNotBlank() }
-            val label = accessibleName ?: text ?: visibleText ?: ""
-
-            if (inIfText && label.isBlank()) continue
-
-            val enabled = attrs["enabled"] != "false"
-            val checked = attrs["checked"]
-            val hasFocus = attrs["hasfocus"] == "true"
-
-            fun String.q() = replace("'", "\\'")
-            val xpath = when {
-                accessibleName != null -> "//div[@accessiblename='${accessibleName.q()}' and @class='$cls']"
-                text != null -> "//div[@text='${text.q()}' and @class='$cls']"
-                else -> "//div[@class='$cls']"
-            }
-
-            val flags = buildList {
-                if (!enabled) add("disabled")
-                if (cls in CHECKBOX_CLASSES) add(if (checked == "true") "checked" else "unchecked")
-                if (hasFocus) add("focused")
-            }.joinToString(", ")
-
-            val displayLabel = if (label.isNotBlank()) "\"${label.take(48)}\"" else "\"\""
-            val flagStr = if (flags.isNotBlank()) "  [$flags]" else ""
-            println("%-28s %-50s  %s%s".format("[$cls]", displayLabel, xpath, flagStr))
-            count++
-        }
-        if (count == 0) println("(no interactive elements found)")
+        print(connect().callJs<String>(stateSummaryJs(allWindows, rows), true))
         return 0
     }
 }

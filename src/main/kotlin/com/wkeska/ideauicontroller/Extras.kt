@@ -602,6 +602,11 @@ internal fun RemoteRobot.openFile(path: String, line: Int?, column: Int): String
         if (path.charAt(0) !== '/') path = p.getBasePath() + '/' + path;
         var f = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByPath(path);
         if (f === null) throw 'No such file: ' + path;
+        // No active window after a dialog closes on Xvfb (no window manager): then nothing can take the focus
+        if (java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getActiveWindow() === null) {
+            var frame = com.intellij.openapi.wm.WindowManager.getInstance().getFrame(p);
+            if (frame !== null) { frame.toFront(); frame.requestFocus(); }
+        }
         var d = ${if (line != null) "new com.intellij.openapi.fileEditor.OpenFileDescriptor(p, f, ${line - 1}, ${column - 1})" else "new com.intellij.openapi.fileEditor.OpenFileDescriptor(p, f)"};
         var e = com.intellij.openapi.fileEditor.FileEditorManager.getInstance(p).openTextEditor(d, true);
         if (e === null) com.intellij.openapi.fileEditor.FileEditorManager.getInstance(p).openFile(f, true);
@@ -641,6 +646,10 @@ class OpenProjectCommand : Callable<Int> {
             found;
         """.trimIndent()
         if (r.callJs<String>(openJs, false) == "no") {
+            // The IDE's file system, not ours: in Docker only --mount'ed directories exist
+            check(r.callJs<Boolean>("java.nio.file.Files.exists(java.nio.file.Paths.get('${jsEscape(abs.toString())}'))", false)) {
+                "The IDE sees no $abs" + (State.load()?.container?.let { ". It runs in Docker: pass the directory to runIde --mount" } ?: "")
+            }
             r.runJs(
                 """
                 com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(function() {
@@ -655,19 +664,53 @@ class OpenProjectCommand : Callable<Int> {
             check(System.currentTimeMillis() < deadline) {
                 "Project $abs didn't open within ${timeoutSeconds}s. Focus: " + focusLine(r)
             }
+            dismissOnboarding(r)
             Thread.sleep(500)
         }
         if (!noWaitSmart) {
             while (!runCatching { r.callJs<Boolean>("com.intellij.openapi.project.DumbService.isDumb(${projectByNameJs(name)}) === false", false) }.getOrDefault(false)) {
                 check(System.currentTimeMillis() < deadline) { "Project $abs still indexing after ${timeoutSeconds}s" }
+                dismissOnboarding(r)
                 Thread.sleep(1000)
             }
+        }
+        // "Meet the Islands Theme" is modal: until someone clicks Skip, indexing doesn't finish and EDT scripts wait
+        // It can show up after indexing, and it closes asynchronously: wait until it's gone, or 2 s for it to show up
+        val graceEnd = System.currentTimeMillis() + 2_000
+        val giveUp = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < giveUp) {
+            val showing = dismissOnboarding(r)
+            if (!showing && (onboardingSeen || System.currentTimeMillis() > graceEnd)) break
+            Thread.sleep(250)
         }
         println("Project '$name' open${if (noWaitSmart) "" else " and smart"}. Focus: ${focusLine(r)}")
         file?.let { println(r.openFile(it, line, 1)) }
         if (state) println(r.editorState(null, java.time.Duration.ofSeconds(5), 400, null))
         return 0
     }
+
+    private var onboardingSeen = false
+
+    /** Closes the onboarding dialog if it's showing; true while it is. */
+    private fun dismissOnboarding(r: RemoteRobot): Boolean = runCatching {
+        r.callJs<Boolean>(
+            """
+            var ws = java.awt.Window.getWindows(), found = false;
+            for (var i = 0; i < ws.length; i++) {
+                if (!ws[i].isShowing() || !(ws[i] instanceof javax.swing.JDialog)) continue;
+                var dw = com.intellij.openapi.ui.DialogWrapper.findInstance(ws[i].getContentPane());
+                if (dw !== null && String(dw.getClass().getSimpleName()) === 'NewUiOnboardingDialog') {
+                    found = true;
+                    com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(new java.lang.Runnable({
+                        run: function() { dw.close(com.intellij.openapi.ui.DialogWrapper.CANCEL_EXIT_CODE); }
+                    }), com.intellij.openapi.application.ModalityState.any());
+                }
+            }
+            found;
+            """.trimIndent(),
+            false,
+        )
+    }.getOrDefault(false).also { if (it) onboardingSeen = true }
 
     private fun projectByNameJs(name: String) = """
         (function() {

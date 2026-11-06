@@ -162,7 +162,17 @@ runIde --docker --split /tmp/proj/ConsoleApp.sln --timeout-seconds 900 --plugin 
 - `ideCache [--keep N]` — list the Linux IDEs cached for `--docker` (size, last use, path), most recently used first. `--keep N` deletes all but the N most recently used, plus leftover archives, unfinished unpacks and sandboxes; refuses while an IDE runs.
 
 **Generic**
-- `getStateSummary` — **default observation command.** Prints the focus summary then a compact list of every interactive element (buttons, fields, checkboxes, menus, lists, trees, dialogs) with ready-to-use xpaths. Use this after every state-changing action. Pipe through `grep` to narrow further. Falls back to `getState` when you need the raw tree.
+- `getStateSummary [--rows N] [--all-windows]` — **default observation command.** Prints the current window, then one line per control of it and of the popups on top of it (Search Everywhere, completion, combo popups), each with a ready-to-use xpath: buttons, fields with `value="..."`, checkboxes `[checked]`/`[unchecked]` (the real state), combos with the selected item, editors, labels. Lists and trees also print their visible rows (`>` selected in a list, `*` selected in a tree, `v`/`>` expanded/collapsed), up to `--rows` (15). Flags: `disabled`, `focused` (holds the keyboard focus or contains it), `x2` (the xpath matches more than one control: narrow it). Background windows are only named; `--all-windows` lists their controls too. Pipe through `grep` to narrow further. Falls back to `getState` when you need the raw tree.
+  ```
+  Current window: (HeavyWeightWindow)
+  Other windows: ['demo – Main.java' (IdeFrameImpl)]
+  --- (HeavyWeightWindow) ---
+  [SeTextField]     ""   //div[@class='SeTextField']  [value="reformat", focused]
+  [SeResultJBList]  ""   //div[@class='SeResultJBList']
+      > 0: Reformat Code Ctrl+Alt+L
+        1: Reformat File… Ctrl+Alt+Shift+L
+        (19 rows, from 0)
+  ```
 - `getState` — print a **focus summary** (current window + list of other visible windows) followed by the full UI component tree (XML). Use as a fallback when `getStateSummary` isn't sufficient. Add `--no-tree` to get only the focus summary. Expected shape:
   ```
   Current window: 'New Project' (MyDialog)
@@ -170,7 +180,7 @@ runIde --docker --split /tmp/proj/ConsoleApp.sln --timeout-seconds 900 --plugin 
   --- component tree ---
   <html>…
   ```
-- `screenshot [--output PATH]` — capture what the robot-server sees and save it as a PNG; prints the output path. **Last-resort fallback only** — use `getStateSummary` for all normal observation. Only reach for this when a visual element cannot be identified through the component tree (e.g. a canvas render, an icon with no accessible name, diagnosing a visually broken layout). After running it, read the file at the printed path to interpret it visually.
+- `screenshot [--output PATH] [--window | --xpath XPATH] [--scale F]` — capture what the robot-server sees and save it as a PNG; prints the output path. An image costs tokens by its pixel count: crop to the active window (`--window`) or one component (`--xpath`) and shrink it (`--scale 0.5`). A cropped shot also prints `origin=x,y size=WxH`; a pixel maps back to `clickAt` coordinates as `origin + pixel / scale`. **Last-resort fallback only** — use `getStateSummary` for all normal observation. Only reach for this when a visual element cannot be identified through the component tree (e.g. a canvas render, an icon with no accessible name, diagnosing a visually broken layout). After running it, read the file at the printed path to interpret it visually.
 - `parseScreenshot [--output PATH] [--threshold N] [--device auto|mps|cpu|cuda] [--debug]` — screenshot + local OmniParser v2 inference in one step. Takes a screenshot, runs YOLO detection + Florence-2 captioning locally (MPS on Apple Silicon, CPU elsewhere), and prints a JSON array of detected UI elements:
   ```json
   [{"id":0,"type":"icon","label":"Settings","x1":10,"y1":20,"x2":50,"y2":60,"cx":30,"cy":40,"w":40,"h":40}, ...]
@@ -195,7 +205,17 @@ runIde --docker --split /tmp/proj/ConsoleApp.sln --timeout-seconds 900 --plugin 
 - `welcomeVerify`
 - `welcomeNewProject` · `welcomeNewSolution` · `welcomeMoreActions` · `welcomeImportProject` · `welcomeHeavyweightPopup`
 
-**Editor** (all take optional `--file <tab-title>`; omit to target the first `EditorComponentImpl`)
+**Opening projects and files**
+- `openProject PATH [--file F [--line N]] [--no-wait-smart] [--timeout-seconds 180] [--state]` — open a project directory (or `.sln`, `pom.xml`, ...) and wait until it's open and indexed; `--file` (relative to the project) then opens a file with the caret on `--line`. No trust dialog (`runIde` trusts all projects); the "Meet the Islands Theme" onboarding dialog is closed for you (it's modal and would keep the project indexing forever). With `--docker` the directory must be `--mount`ed: a path the IDE doesn't see fails at once. Use this, not the Welcome → Open → file chooser path.
+- `openFile PATH [--line N] [--column N] [--state]` — open a file in the active project and focus its editor (a relative PATH is resolved against the project dir). Also brings the frame back when nothing in the IDE is active.
+
+**Editor** (all take optional `--file <tab-title>`; omit to target the focused editor, else the selected one)
+- `editorState [--max-chars 400] [--js EXPR]` — **the cheapest editor check**: one line with file, caret `line:col` (1-based), offset, caret count, selection, caret shape, focus, visible lines, line count; then the text as JSON with `|` at each caret — whole up to `--max-chars`, else the lines around the caret. `--js` adds one expression (`editor` bound) as `js=...`:
+  ```
+  file=Main.java caret=3:1 offset=65 shape=DEFAULT focus=true visible=1-42 lines=6
+  text="public class Main {\n    public static void main(String[] args) {\n|        System.out.println(1);\n    }\n}\n"
+  ```
+- `--state` on `sendKey`, `sendKeyCombo`, `typeText`, `clickAt`, `openFile`, `openProject` prints `editorState` after the action: one call instead of two.
 - `editorVerify` · `editorOpen --file X` (clicks the tab)
 - `editorGetText` · `editorGetSelectedText` · `editorCaretOffset` · `editorCaretCount`
 - `editorIsBlockCursor` — true for BLOCK/UNDERSCORE shape (Vim normal mode); false for BAR (insert) and DEFAULT (no Vim). Uses the IntelliJ platform caret API — no IdeaVim reflection.
@@ -226,7 +246,7 @@ runIde --docker --split /tmp/proj/ConsoleApp.sln --timeout-seconds 900 --plugin 
 - `listSelect --xpath "<locator for the JList>" (--index N | --text "...")` — select a JBList/JList row. **JList only** — fails on `JTree` components (e.g. the Project tool window tree); use `treeSelect` for those.
 - `treeSelect --xpath "<locator for the JTree>" (--index N | --text "...")` — select a row in a JTree by zero-based index or by its last path component's `toString()`. Use for the Project tool window tree and any other `JTree`-backed widget. After selecting a node, trigger actions on it via keyboard shortcut (e.g. `sendKeyCombo --key INSERT --modifier ALT` for Alt+Insert / New).
 - `textFieldSet --label "..." --text "..."` — set a JTextComponent whose `labelFor` is the given JLabel.
-- `checkboxSet --text "..." --checked true --checked false` — click a JCheckBox only if its current state differs. `--checked` requires an explicit value: `true` or `false`.
+- `checkboxSet --text "..." --checked true|false` — click a JCheckBox only if its current state differs, then print the state it has now (`checked`/`unchecked`); exits 1 when that isn't the one asked for. A checkbox scrolled out of view still works. `--checked` requires an explicit value.
 - `actionLinkClickByText --text "Skip"` — same as `linkClick`. Handy for dismissing onboarding panels.
 
 **High-level flows**
@@ -234,18 +254,11 @@ runIde --docker --split /tmp/proj/ConsoleApp.sln --timeout-seconds 900 --plugin 
 
 - `jbaLogin [--token T | --token-file F | --token -]` — EAP login, see below.
 
-**Opening an existing project** (no dedicated command yet — do these steps manually):
-```sh
-~/.claude/skills/idea-ui-controller/idea-ui-controller clickButton --xpath "//div[@accessiblename='Open' and @class='JButton']"
-# set the path without keystrokes — plain typeText triggers autocomplete on every char
-~/.claude/skills/idea-ui-controller/idea-ui-controller typeText --set --text '/your/project/path'
-~/.claude/skills/idea-ui-controller/idea-ui-controller sendKey --key ENTER
-# Trust Project dialog always appears on first open of a project in the sandbox
-~/.claude/skills/idea-ui-controller/idea-ui-controller clickButton --xpath "//div[@accessiblename='Trust Project' and @class='JButton']"
-# "Meet the Islands Theme" onboarding panel reliably appears after every project open — always dismiss it
-~/.claude/skills/idea-ui-controller/idea-ui-controller actionLinkClickByText --text "Skip"
-~/.claude/skills/idea-ui-controller/idea-ui-controller ideWaitSmart
-```
+**Opening an existing project**: `openProject /path/to/project --file src/Main.java --line 3 --state` does it all in one call.
+
+**Waiting and logs**
+- `waitFor (--text T | --xpath X) [--gone] [--timeout-seconds N]` — until a component shows up (or with `--gone` disappears). Use instead of `sleep`.
+- `ideLog [--mark] [--since-mark] [--grep REGEX] [--errors] [--tail 40] [--width 300] [--backend]` — the IDE's `idea.log`, filtered. Typical: `ideLog --mark`, reproduce, `ideLog --since-mark --errors`.
 - `createScratchFile --name X.ext [--language LANG] [--content "..."]` — creates a scratch file via `ScratchRootType` and opens it. Requires a project to be open (`ideVerify`). `--language` is an IntelliJ Language ID (e.g. `kotlin`, `JAVA`, `Python`); defaults to plain text. Note: scratches don't live under the project directory — they're stored under the IDE's config dir (in our case the CLI's sandbox: `<sandbox>/config*/scratches/`).
 
 ## EAP login (fresh sandbox)
@@ -269,7 +282,9 @@ $U jbaLogin --token-file /path/token # setText into the field, "Check Token" onc
 
 - In scope: `robot` (assertj robot), `log`, and `global` — a `Map` shared by all scripts, the place to keep state
   between calls (a JS `var` is gone after the script). `component` only exists in fixture-scoped scripts.
+- `runJs`/`callJs` take the script as an argument, `-s SCRIPT` or `-f FILE` (no shell quoting trouble), `--edt` to run on the EDT.
 - Prelude functions available in every script:
+  - `targetProject()`, `targetEditor()` — the active project, and its focused (else selected) editor.
   - `loadPluginClass(pluginId, fqn)` — a `Class` from a plugin, searching its main and all content-module class loaders.
   - `pluginClass(pluginId, fqn)` — the same, wrapped for static calls:
     `pluginClass('IdeaVIM', 'com.maddyhome.idea.vim.api.VimInjectorKt').getInjector()`.
@@ -367,7 +382,7 @@ Any script valid as a `RemoteRobot.callJs` body works — full Java reflection i
     ~/.claude/skills/idea-ui-controller/idea-ui-controller getState | grep -n "accessiblename\|class=\"JButton\"" | head -20
     ~/.claude/skills/idea-ui-controller/idea-ui-controller getState > /tmp/ui.xml && grep -n "BorderlessTextField" /tmp/ui.xml
     ```
-- **`Current window: <none>` means focus loss — act on it immediately.** If `getState` reports `Current window: <none>`, the IDE window is unfocused (a native dialog, OS event, or prior action stole it). Any keyboard or click action you send next will silently go nowhere. **Stop, call `focusWindow` (optionally `--title <substring>` to target a specific window), then call `getState` again to confirm focus is restored before continuing.** Do not skip this step and do not assume the next action will work anyway.
+- **`Current window: <none>` means focus loss — act on it immediately.** If `getState` reports `Current window: <none>`, the IDE window is unfocused (a native dialog, OS event, or prior action stole it). It happens in Docker after a dialog closes (e.g. the onboarding "Skip"). Any keyboard action you send next goes nowhere; `sendKey`/`sendKeyCombo`/`typeText` print `warning: nothing in the IDE has keyboard focus` then. `openFile` focuses the editor. **Stop, call `focusWindow` (optionally `--title <substring>` to target a specific window), then call `getState` again to confirm focus is restored before continuing.** Do not skip this step and do not assume the next action will work anyway.
 - **Multiple matches.** `clickButton --text` can match several components (e.g. a `JButton` and its child `JBLabel` both carry the label text). The CLI clicks the first match and prints a warning. When the action doesn't fire, add `--xpath` with a `@class` predicate: `"//div[@accessiblename='New Project' and @class='JButton']"`.
 - **Quoting paths with spaces.** Always quote the `.app` path — it contains a space (`IntelliJ IDEA.app`).
 - **Idempotency / stale state recovery.** `runIde` refuses to start an instance name that already runs (pass `--restart`). If a command errors with a connection failure (`ConnectException`, socket timeout), the daemon may be dead while its state file still points at it. Recover with `stopIde` (same `--instance`; it tolerates a stale state) then `runIde` again. Dead instances' state files are cleaned up by the next `runIde`.

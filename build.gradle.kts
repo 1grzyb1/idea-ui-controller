@@ -55,7 +55,14 @@ tasks.register("executable") {
     outputs.file(outFile)
     doLast {
         val javaHome = javaLauncher.get().metadata.installationPath.asFile.absolutePath
-        val stub = "#!/bin/sh\nJAVA_HOME=\"$javaHome\"\nPATH=\"\$JAVA_HOME/bin:\$PATH\"\nexec java --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED -jar \"\$0\" \"\$@\"\n"
+        // An absolute path: the class cache (AotCache.kt) only matches the classpath it was trained with
+        val stub = """
+            |#!/bin/sh
+            |JAVA_HOME="$javaHome"
+            |PATH="${'$'}JAVA_HOME/bin:${'$'}PATH"
+            |case "${'$'}0" in /*) BIN="${'$'}0" ;; *) BIN="${'$'}PWD/${'$'}0" ;; esac
+            |exec java -XX:AOTCache="${'$'}BIN.aot" -Xlog:aot=off -Xlog:cds=off --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED -Diuc.binary="${'$'}BIN" -jar "${'$'}BIN" "${'$'}@"
+            |""".trimMargin()
         val jar = tasks.shadowJar.get().archiveFile.get().asFile
         val out = outFile.get().asFile
         out.outputStream().use { os ->

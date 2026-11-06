@@ -33,6 +33,8 @@ This project has three tightly coupled pieces. A change to the CLI API (new subc
 - `Pages.kt` — page-scoped commands: Welcome frame, Editor, IDE frame, Dialog, Search Everywhere, Action Menu, Gutter, generic widgets (`listSelect`, `textFieldSet`, `checkboxSet`, `dialogClickButton`), and high-level flows (`projectCreateFromDialog`, `createScratchFile`).
 - `Extras.kt` — the `runJs`/`callJs` script prelude (`loadPluginClass`, `pluginClass`, `normText`, `focusOwner`, `onEdt`), HTML-entity decoding for xpaths and texts, `linkClick`, `clipboard`, `focusedComponent`, `traceActions`, `jbaLogin`, and for Docker IDEs `view` (noVNC live view, served from the container by `entrypoint.sh`) and `record` (ffmpeg in the container).
 
+- `AotCache.kt` — every command is a new JVM; the stub passes `-XX:AOTCache=<binary>.aot`, which the first command that reaches an IDE trains in the background (hidden `aotTraining` command). A missing or outdated cache is silently ignored.
+
 **Underlying library:** JetBrains [`intellij-ui-test-robot`](https://github.com/JetBrains/intellij-ui-test-robot) (NOT Robot Framework). All locator syntax (`byXpath`), fixture semantics, and `callJs`/`runJs` contracts come from there.
 
 **Build:**
